@@ -22,6 +22,28 @@ export class LocalStorage implements Storage {
   }
 }
 
+/**
+ * The S3 client, built for providers that are S3-COMPATIBLE rather than AWS.
+ *
+ * WHY THE CHECKSUM SETTINGS: since early 2025 the AWS SDK adds a CRC32 checksum
+ * (and a trailing-checksum streaming body) to every upload by default. Real AWS
+ * understands them; Backblaze B2 (this school's storage) and several other
+ * S3-compatible services reject them. `WHEN_REQUIRED` restores the plain
+ * requests those providers have always accepted, and still works on AWS/MinIO.
+ * A local MinIO test cannot catch this — it accepts both — so it is pinned by a
+ * unit test rather than left to be discovered on the first real class.
+ */
+export function createS3Client(config: Pick<Config, "S3_REGION" | "S3_ENDPOINT" | "S3_ACCESS_KEY" | "S3_SECRET">): S3Client {
+  return new S3Client({
+    region: config.S3_REGION,
+    endpoint: config.S3_ENDPOINT,
+    forcePathStyle: Boolean(config.S3_ENDPOINT),
+    credentials: { accessKeyId: config.S3_ACCESS_KEY!, secretAccessKey: config.S3_SECRET! },
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
+  });
+}
+
 /** R2 / S3 / B2 / MinIO — anything S3-compatible. Multipart, so a 1 GB class is fine. */
 export class S3Storage implements Storage {
   private readonly client: S3Client;
@@ -30,12 +52,7 @@ export class S3Storage implements Storage {
     config: Pick<Config, "S3_REGION" | "S3_ENDPOINT" | "S3_ACCESS_KEY" | "S3_SECRET">,
     private readonly log: Logger,
   ) {
-    this.client = new S3Client({
-      region: config.S3_REGION,
-      endpoint: config.S3_ENDPOINT,
-      forcePathStyle: Boolean(config.S3_ENDPOINT),
-      credentials: { accessKeyId: config.S3_ACCESS_KEY!, secretAccessKey: config.S3_SECRET! },
-    });
+    this.client = createS3Client(config);
   }
 
   async put(localPath: string, key: string): Promise<void> {

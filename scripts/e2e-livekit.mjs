@@ -29,6 +29,15 @@ const fixtures = resolve("fixtures");
 const outDir = resolve("out");
 
 const sh = (args) => execFileSync("docker", args, { encoding: "utf8" }).trim();
+// Helper scripts (seed/inspect the throwaway DB, talk to the local MinIO) — print one JSON line.
+const nodeJson = (script, args) => JSON.parse(execFileSync("node", [join("scripts", script), ...args], { encoding: "utf8" }).trim().split("\n").pop());
+const LMS_CALLBACK = "http://127.0.0.1:3200/api/recorder/callback";
+async function replayCallback(payload) {
+  const body = JSON.stringify(payload);
+  const ts = String(Date.now());
+  const res = await fetch(LMS_CALLBACK, { method: "POST", headers: { "content-type": "application/json", "x-recorder-timestamp": ts, "x-recorder-signature": lms.signRecorderBody(secret, ts, body) }, body });
+  return { status: res.status, json: await res.json().catch(() => ({})) };
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const gb = (bytes) => (bytes / 1024 ** 3).toFixed(1);
 
@@ -62,8 +71,9 @@ const lms = await import(pathToFileURL(join(LMS, "src/lib/recorder.ts")).href);
 
 // In REAL_DIRECT mode the real LMS route verifies the signature, so both sides need the same secret:
 // the throwaway one in the worktree's git-ignored .env. Otherwise a fresh random one.
+const S3_TEST = process.env.S3_TEST; // upload to the LOCAL MinIO, then exercise the real LMS callback + library logic
 let secret = randomBytes(32).toString("hex");
-if (process.env.REAL_DIRECT) {
+if (process.env.REAL_DIRECT || S3_TEST) {
   const m = readFileSync(join(LMS, ".env"), "utf8").match(/^RECORDER_SHARED_SECRET=(\S+)/m);
   if (!m) throw new Error("REAL_DIRECT needs RECORDER_SHARED_SECRET in the worktree .env");
   secret = m[1];
@@ -122,7 +132,11 @@ let ok = false;
 try {
   console.log("starting recorder (capped: 2 CPUs, 1.5 GB)…");
   sh(["run", "-d", "--name", "er-lk-recorder", "--cpus=2", "--memory=1500m", "--memory-swap=1500m", "-p", "8787:8787", ...common,
-    "-v", `${outDir}:/out`, "-e", `RECORDER_SHARED_SECRET=${secret}`, "-e", "LOCAL_OUTPUT_DIR=/out",
+    "-v", `${outDir}:/out`, "-e", `RECORDER_SHARED_SECRET=${secret}`,
+    // S3_TEST: the recorder uploads through its real S3 code to the local MinIO; otherwise it just copies files.
+    ...(S3_TEST
+      ? ["-e", "S3_BUCKET=recorder-test", "-e", "S3_REGION=us-east-1", "-e", `S3_ENDPOINT=http://${HOST}:9000`, "-e", "S3_ACCESS_KEY=recordertest", "-e", "S3_SECRET=recordertest-secret-123"]
+      : ["-e", "LOCAL_OUTPUT_DIR=/out"]),
     "-e", `PAGE_JOIN_TIMEOUT_SECONDS=${process.env.PAGE_JOIN_TIMEOUT_SECONDS || 45}`,
     "-e", `ALLOWED_PAGE_ORIGINS=${base}`, "-e", `ALLOWED_CALLBACK_ORIGINS=${base}`, IMAGE]);
   for (let i = 0; i < 120; i++) { try { if ((await fetch("http://127.0.0.1:8787/healthz")).ok) break; } catch {} await sleep(500); }
@@ -168,8 +182,20 @@ try {
   console.log("\n--- callback the LMS would have received ---");
   console.log(callbacks.length ? JSON.stringify(callbacks.map((c) => ({ signatureOk: c.verdict.ok, parsed: c.parsed, becomes: c.egress && { egressId: c.egress.egressId, status: c.egress.status, hasFile: Boolean(c.egress.fileResults) } })), (k, v) => typeof v === "bigint" ? v.toString() : v, 1) : "NONE");
 
+  let storageOk = true;
+  const check = (label, cond, extra = "") => { console.log(`  ${cond ? "PASS" : "FAIL"}  ${label}${extra ? "  " + extra : ""}`); if (!cond) storageOk = false; };
+
   if (job.status === "done") {
-    const file = `/out/${objectKey}`;
+    let file = `/out/${objectKey}`;
+    if (S3_TEST) {
+      // What actually arrived in the bucket, fetched back and inspected — not what the recorder claims.
+      console.log("\n=== UPLOAD ===");
+      const head = nodeJson("s3-util.mjs", ["head", objectKey]);
+      check("object is in the bucket", head.exists, JSON.stringify(head));
+      check("its size matches what the recorder reported", head.size === job.sizeBytes, `(${head.size} vs ${job.sizeBytes})`);
+      nodeJson("s3-util.mjs", ["get", objectKey, join("out", "downloaded.mp4")]);
+      file = "/out/downloaded.mp4";
+    }
     console.log("\n--- ffprobe ---");
     console.log(sh(["exec", "er-lk-recorder", "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate:format=duration,size", "-of", "compact", file]));
     const vol = spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-i", file, "-af", "volumedetect", "-vn", "-f", "null", "-"], { encoding: "utf8" });
@@ -178,6 +204,48 @@ try {
     audioMean = Number((vol.stderr.match(/mean_volume:\s*(-?[\d.]+)/) || [])[1] ?? -Infinity);
     for (const t of [8, 25, 45]) spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-y", "-ss", String(t), "-i", file, "-frames:v", "1", `/out/live-frame-${t}s.png`], { stdio: "ignore" });
     console.log("frames saved in", outDir);
+
+    if (S3_TEST) {
+      console.log("\n=== LMS LIBRARY STAGE (real route, real schema, throwaway DB + MinIO) ===");
+      const cb = callbacks.find((c) => c.parsed?.status === "completed")?.parsed;
+      check("recorder's callback reached this script, signed and valid", Boolean(cb));
+      nodeJson("lms-db.cjs", ["init"]);
+      nodeJson("lms-db.cjs", ["seedrec", cb.jobId, objectKey, roomName]);
+
+      // The test class is ~1 minute; the LMS keeps group classes of 40+ minutes. So replay the
+      // recorder's real callback with a 45-minute duration to exercise the "keep it" path on the
+      // REAL uploaded file. (Only the duration is changed.)
+      const created = await replayCallback({ ...cb, durationSeconds: 2700 });
+      check("LMS verifies the file in the bucket and creates the recording", created.json.outcome === "created", JSON.stringify(created));
+      const shown = nodeJson("lms-db.cjs", ["show", cb.jobId]);
+      check("recording row completed, linked to a Watch-shelf entry", shown.recording?.status === "completed" && shown.material?.kind === "recording", JSON.stringify(shown.recording));
+      console.log("   shelf entry:", JSON.stringify(shown.material));
+      check("shelf entry points at the stored file and is the right type", shown.material?.fileType === "video/mp4" && /\.mp4$/.test(shown.material?.filePath ?? ""));
+
+      const again = await replayCallback({ ...cb, durationSeconds: 2700 });
+      check("a repeated callback is harmless (no second entry)", again.json.outcome === "already", JSON.stringify(again));
+
+      const failId = randomBytes(8).toString("hex");
+      nodeJson("lms-db.cjs", ["seedrec", failId, `recordings/test/${failId}.mp4`, roomName]);
+      const failed = await replayCallback({ jobId: failId, status: "failed", objectKey: `recordings/test/${failId}.mp4`, reason: "start-failed" });
+      const failedRow = nodeJson("lms-db.cjs", ["show", failId]);
+      check("a failed recording is recorded as failed (admins get alerted)", failed.json.outcome === "failed" && failedRow.recording?.status === "failed", JSON.stringify(failedRow.recording));
+
+      const ghost = await replayCallback({ ...cb, jobId: randomBytes(8).toString("hex") });
+      check("a callback for a class the LMS never heard of is accepted quietly (no retry storm)", ghost.status === 200 && ghost.json.outcome === "unknown", JSON.stringify(ghost));
+
+      const badSig = await fetch(LMS_CALLBACK, { method: "POST", headers: { "content-type": "application/json", "x-recorder-timestamp": String(Date.now()), "x-recorder-signature": "sha256=" + "0".repeat(64) }, body: JSON.stringify(cb) });
+      check("a forged callback is refused", badSig.status === 401, `(HTTP ${badSig.status})`);
+
+      const shortId = randomBytes(8).toString("hex");
+      nodeJson("lms-db.cjs", ["seedrec", shortId, objectKey, roomName]);
+      // The LMS does not delete a short GROUP class on the spot: it HOLDS it for 48 hours (completed row,
+      // NO Watch-shelf entry, file kept) so a class cut short by a dropped connection can be noticed.
+      const short = await replayCallback({ ...cb, jobId: shortId });
+      const shortRow = nodeJson("lms-db.cjs", ["show", shortId]);
+      check("a short group class (32 s) is held, NOT shown on the shelf", short.json.outcome === "created" && shortRow.recording?.status === "completed" && shortRow.recording?.materialId === null, JSON.stringify(shortRow.recording));
+      check("...and its file is kept in the bucket for the 48-hour review window", nodeJson("s3-util.mjs", ["head", objectKey]).exists);
+    }
   }
   console.log(`audio mean ${audioMean} dB (must be louder than -50 dB)`);
   // In REAL_DIRECT mode the callback goes to the real LMS route, not to this script; the recorder's
@@ -186,7 +254,7 @@ try {
     ? /"callback delivered"/.test(spawnSync("docker", ["logs", "er-lk-recorder"], { encoding: "utf8" }).stdout || "")
     : callbacks.some((c) => c.verdict.ok && c.parsed);
   console.log(`callback reached the LMS and was accepted: ${delivered}`);
-  ok = job.status === "done" && audioMean > -50 && delivered;
+  ok = job.status === "done" && audioMean > -50 && delivered && storageOk;
 } finally {
   server.close();
   try { await new RoomServiceClient(vars.LIVEKIT_URL.replace(/^wss:/, "https:"), vars.LIVEKIT_API_KEY, vars.LIVEKIT_API_SECRET).deleteRoom(roomName); } catch {}
