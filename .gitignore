@@ -9,3 +9,7 @@ out/
 *.log
 tools/loadpub/media/
 tools/loadpub/loadpub.exe
+deploy/cloud-init.generated.yaml
+deploy/bench/loadpub-linux-amd64
+deploy/.env
+deploy/bench/bench.env

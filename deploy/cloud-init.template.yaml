@@ -1,0 +1,25 @@
+#cloud-config
+# Paste this whole text into the "Cloud config" box when creating the server.
+# On first boot the server sets itself up: installs Docker, turns on a firewall,
+# and lets the holder of the matching private key (kept on the school's laptop) log in.
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - ufw
+  - nodejs
+  - htop
+  - sysstat
+users:
+  - name: root
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - ufw allow OpenSSH
+  - ufw allow 8787/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+  - mkdir -p /opt/eduprime-recorder/spool /opt/eduprime-recorder/out /opt/eduprime-recorder/bench
+  - touch /opt/eduprime-recorder/.setup-done

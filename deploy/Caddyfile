@@ -1,0 +1,5 @@
+# Automatic HTTPS for the recorder. Caddy fetches and renews the certificate by itself.
+# RECORDER_DOMAIN (e.g. recorder.yourschool.com) must already point at this server's IP address.
+{$RECORDER_DOMAIN} {
+	reverse_proxy recorder:8787
+}

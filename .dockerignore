@@ -6,3 +6,5 @@ out
 .env.*
 test
 *.md
+tools
+deploy

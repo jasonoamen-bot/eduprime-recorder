@@ -1,0 +1,52 @@
+# How the recorder runs on a server.
+#
+#   docker compose -f deploy/docker-compose.yml up -d          start / update
+#   docker compose -f deploy/docker-compose.yml logs -f        watch it
+#   docker compose -f deploy/docker-compose.yml down           stop it
+#
+# Settings come from deploy/.env (copy deploy/env.server.example and fill it in).
+
+services:
+  recorder:
+    image: eduprime-recorder:server
+    build:
+      context: ..
+      dockerfile: Dockerfile.server
+    container_name: recorder
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8787:8787" # the LMS calls this. In production put HTTPS in front (see Caddyfile) and close this port.
+    shm_size: "1gb" # Chromium needs shared memory
+    volumes:
+      - ../spool:/data/spool # half-finished recordings survive a restart
+      - ../out:/out # only used when LOCAL_OUTPUT_DIR=/out (tests)
+    # `docker stop` gives the recorder time to finish and upload the classes in progress.
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # OPTIONAL: automatic HTTPS. Start with:  docker compose --profile https up -d
+  # Needs a domain name pointing at this server (see deploy/README.md).
+  caddy:
+    profiles: ["https"]
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - RECORDER_DOMAIN=${RECORDER_DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - recorder
+
+volumes:
+  caddy_data:
