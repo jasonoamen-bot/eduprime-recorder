@@ -127,11 +127,22 @@ rmSync(outDir, { recursive: true, force: true }); mkdirSync(outDir, { recursive:
 for (const n of ["er-lk-recorder", "er-lk-publisher"]) spawnSync("docker", ["rm", "-f", n], { stdio: "ignore" });
 const common = ["--add-host", `${HOST}:host-gateway`, "-v", `${fixtures}:/app/fixtures:ro`, "--shm-size=512m"];
 let recorderPeak = { cpu: 0, mem: "" };
+// SOAK=1: a long class. Samples the recorder's CPU/memory over time and analyses the finished file
+// for frozen video, picture/sound length mismatch and timing drift.
+const SOAK = process.env.SOAK;
+// What the recorder container may use. Real classes need ~3 cores; the default is what the first tests used.
+const RECORDER_CPUS = Number(process.env.RECORDER_CPUS || 2);
+const RECORDER_MEM = Number(process.env.RECORDER_MEM || 1500);
+const series = [];
+let lastSample = 0;
+const soakStart = Date.now();
+const toMiB = (s) => { const n = parseFloat(s); return /GiB/i.test(s) ? n * 1024 : /KiB/i.test(s) ? n / 1024 : n; };
 let audioMean = -Infinity;
 let ok = false;
 try {
-  console.log("starting recorder (capped: 2 CPUs, 1.5 GB)…");
-  sh(["run", "-d", "--name", "er-lk-recorder", "--cpus=2", "--memory=1500m", "--memory-swap=1500m", "-p", "8787:8787", ...common,
+  console.log(`starting recorder (capped: ${RECORDER_CPUS} CPUs, ${RECORDER_MEM} MB${process.env.VIDEO_PRESET ? ", preset " + process.env.VIDEO_PRESET : ""})…`);
+  sh(["run", "-d", "--name", "er-lk-recorder", `--cpus=${RECORDER_CPUS}`, `--memory=${RECORDER_MEM}m`, `--memory-swap=${RECORDER_MEM}m`, "-p", "8787:8787", ...common,
+    ...(process.env.VIDEO_PRESET ? ["-e", `VIDEO_PRESET=${process.env.VIDEO_PRESET}`] : []),
     "-v", `${outDir}:/out`, "-e", `RECORDER_SHARED_SECRET=${secret}`,
     // S3_TEST: the recorder uploads through its real S3 code to the local MinIO; otherwise it just copies files.
     ...(S3_TEST
@@ -169,9 +180,13 @@ try {
     }
     job = await view();
     if (i % 5 === 0) console.log("  recorder:", job.status);
-    if (job.status === "recording") {
+    // SOAK samples every 30 s (a `docker stats` call is slow and there are ~900 polls in 30 minutes).
+    if (job.status === "recording" && Date.now() - lastSample >= (SOAK ? 30_000 : 0)) {
+      lastSample = Date.now();
       const [cpu, mem] = sh(["stats", "er-lk-recorder", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}"]).split("|");
       if (parseFloat(cpu) > recorderPeak.cpu) recorderPeak = { cpu: parseFloat(cpu), mem };
+      series.push({ t: Math.round((Date.now() - soakStart) / 1000), cpu: parseFloat(cpu), memMiB: toMiB(mem.split("/")[0]) });
+      if (SOAK && series.length % 10 === 0) console.log(`  [soak ${Math.round(series.at(-1).t / 60)} min] cpu ${series.at(-1).cpu}%  mem ${series.at(-1).memMiB.toFixed(0)} MiB`);
     }
     if (job.status === "done" || job.status === "failed") break;
   }
@@ -202,8 +217,32 @@ try {
     console.log((vol.stderr.match(/(mean_volume|max_volume).*/g) || ["no audio level"]).join("\n"));
     // A silent recording is a failed recording (the first version of this test "passed" with -91 dB).
     audioMean = Number((vol.stderr.match(/mean_volume:\s*(-?[\d.]+)/) || [])[1] ?? -Infinity);
-    for (const t of [8, 25, 45]) spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-y", "-ss", String(t), "-i", file, "-frames:v", "1", `/out/live-frame-${t}s.png`], { stdio: "ignore" });
-    console.log("frames saved in", outDir);
+    const dur = job.durationSeconds || 60;
+    const frameTimes = SOAK ? [60, Math.round(dur / 2), Math.max(61, dur - 30)] : [8, 25, 45];
+    for (const t of frameTimes) spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-y", "-ss", String(t), "-i", file, "-frames:v", "1", `/out/live-frame-${t}s.png`], { stdio: "ignore" });
+    console.log("frames saved in", outDir, "at", frameTimes.join("s, ") + "s");
+
+    if (SOAK) {
+      console.log("\n=== SOAK ANALYSIS ===");
+      const probe = (sel) => JSON.parse(sh(["exec", "er-lk-recorder", "ffprobe", "-v", "error", "-select_streams", sel, "-show_entries", "stream=duration,nb_frames", "-of", "json", file])).streams?.[0] ?? {};
+      const v = probe("v:0"), a = probe("a:0");
+      const vd = Number(v.duration), ad = Number(a.duration);
+      check("picture and sound are the same length (no drift)", Math.abs(vd - ad) < 1.0, `(video ${vd.toFixed(1)} s, audio ${ad.toFixed(1)} s, difference ${(vd - ad).toFixed(2)} s)`);
+      check("the recording is as long as the class ran", vd > publishSeconds * 0.9, `(${(vd / 60).toFixed(1)} min for a ${(publishSeconds / 60).toFixed(0)} min class)`);
+      // The fake camera never stops moving, so a frozen picture means the recorder stalled.
+      const fz = spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-i", file, "-vf", "freezedetect=n=-55dB:d=2", "-an", "-f", "null", "-"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      const freezes = (fz.stderr.match(/freeze_start/g) || []).length;
+      check("no frozen-picture stalls of 2 s or more", freezes === 0, `(${freezes} found)`);
+      const q = Math.max(3, Math.floor(series.length / 4));
+      const avg = (xs) => xs.reduce((s, x) => s + x.memMiB, 0) / xs.length;
+      const early = avg(series.slice(0, q)), late = avg(series.slice(-q));
+      const peak = Math.max(...series.map((s) => s.memMiB));
+      check("memory does not keep climbing (last quarter vs first quarter < +35%)", late < early * 1.35, `(early ${early.toFixed(0)} MiB -> late ${late.toFixed(0)} MiB, peak ${peak.toFixed(0)} MiB of ${RECORDER_MEM})`);
+      check("peak memory stays under 85% of the container's limit", peak < RECORDER_MEM * 0.85);
+      const cpus = series.map((s) => s.cpu);
+      console.log(`   cpu over time: min ${Math.min(...cpus)}%  avg ${(cpus.reduce((x, y) => x + y, 0) / cpus.length).toFixed(0)}%  max ${Math.max(...cpus)}%  (limit ${RECORDER_CPUS * 100}%)`);
+      console.log("   series (min: cpu% / MiB):", series.filter((_, i) => i % 6 === 0).map((s) => `${Math.round(s.t / 60)}:${s.cpu.toFixed(0)}/${s.memMiB.toFixed(0)}`).join("  "));
+    }
 
     if (S3_TEST) {
       console.log("\n=== LMS LIBRARY STAGE (real route, real schema, throwaway DB + MinIO) ===");

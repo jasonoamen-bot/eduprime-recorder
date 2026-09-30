@@ -29,6 +29,24 @@ export type EndReason =
   | "xvfb-exited"
   | "start-failed";
 
+/**
+ * Reasons that mean the recording stopped but the CLASS IS STILL GOING: a crash, a
+ * stall, or hitting our own length cap. Anything else ("room-ended", "stopped-by-lms")
+ * is a real end. The LMS uses this to tell "class over" from "we lost the camera" — it
+ * restarts a recording for a live class on the tutor's next heartbeat, but the
+ * interrupted part must never be reported as a clean finish.
+ */
+export const INTERRUPTION_REASONS: ReadonlySet<EndReason> = new Set<EndReason>([
+  "max-duration",
+  "page-failed",
+  "page-crashed",
+  "ffmpeg-exited",
+  "xvfb-exited",
+  "start-failed",
+]);
+
+export const isInterruption = (reason: string | undefined): boolean => INTERRUPTION_REASONS.has(reason as EndReason);
+
 export type SessionResult = { path: string; durationSeconds: number; sizeBytes: number };
 
 /** Thrown when a stop was requested while still starting up: not a failure, do not retry. */
@@ -122,9 +140,15 @@ export class RecordingSession {
       // attaches afterwards over the debugging port, only to read page state.
       this.userDataDir = join(config.SPOOL_DIR, `chrome-${this.request.jobId}`);
       const debugPort = 9000 + this.displayNumber;
+      // `nice -n 5`: under CPU pressure the OS now favours the capture (ffmpeg, Xvfb) over
+      // the browser. A starved page shows a stale picture for a moment; a starved encoder
+      // piles up frames and takes the whole recording down. `nice` replaces itself with
+      // Chromium, so the process we track and kill is still the browser.
       this.chromium = run(
-        config.CHROMIUM_PATH,
+        "nice",
         [
+          "-n", "5",
+          config.CHROMIUM_PATH,
           // Chromium only treats `--app` as an app window for a real URL; the
           // blank page is silently opened as a normal tabbed window.
           "--app=data:text/html,<title>recorder</title><body style='background:%230b0b0e'>",
@@ -185,6 +209,7 @@ export class RecordingSession {
           height: config.VIDEO_HEIGHT,
           fps: config.VIDEO_FPS,
           crf: config.VIDEO_CRF,
+          preset: config.VIDEO_PRESET,
           output: this.fragPath,
         }),
         log,

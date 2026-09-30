@@ -5,7 +5,7 @@ import { sendCallback } from "./callback.js";
 import type { Config } from "./config.js";
 import type { JobRecord, JobRequest, JobStatus } from "./job.js";
 import type { Logger } from "./log.js";
-import { finalizeFragment, RecordingSession, StartCancelled, type SessionResult } from "./session.js";
+import { finalizeFragment, isInterruption, RecordingSession, StartCancelled, type SessionResult } from "./session.js";
 import type { Storage } from "./storage.js";
 
 export class AtCapacityError extends Error {
@@ -132,6 +132,9 @@ export class JobManager {
     try {
       await this.setStatus(job, "recording", { startedAt: new Date().toISOString() });
       job.reason = await session.ended;
+      // A crash must not look like a clean finish: say so, and keep the reason.
+      job.interrupted = isInterruption(job.reason);
+      if (job.interrupted) log.error("recording interrupted while the class was still going", { reason: job.reason });
       await this.setStatus(job, "finalising");
       result = await session.stop();
     } finally {
@@ -181,6 +184,7 @@ export class JobManager {
         durationSeconds: job.durationSeconds,
         sizeBytes: job.sizeBytes,
         reason: job.reason,
+        interrupted: job.interrupted,
       },
       log,
     );

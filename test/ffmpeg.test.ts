@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { captureArgs, remuxArgs } from "../src/ffmpeg.js";
+import { AUDIO_QUEUE_PACKETS, VIDEO_QUEUE_FRAMES, captureArgs, remuxArgs } from "../src/ffmpeg.js";
 
 const options = {
+  preset: "veryfast",
   display: ":101",
   audioSource: "rec_101.monitor",
   width: 1280,
@@ -32,8 +33,17 @@ describe("capture command", () => {
     expect(after("-af")).toContain("aresample=async=1");
   });
 
-  it("buffers both inputs deeply so a busy CPU does not drop frames", () => {
-    expect(args.filter((arg) => arg === "-thread_queue_size")).toHaveLength(2);
+  it("bounds the raw-frame queue so a slow encoder cannot eat all the memory", () => {
+    // Raw 720p frames are ~3.7 MB each. The 30-minute soak test killed a container at 1024 frames.
+    const queues = args.flatMap((arg, i) => (arg === "-thread_queue_size" ? [Number(args[i + 1])] : []));
+    expect(queues).toHaveLength(2);
+    expect(VIDEO_QUEUE_FRAMES * 1280 * 720 * 4).toBeLessThan(300 * 1024 * 1024); // < 300 MB worst case
+    expect(queues[0]).toBe(VIDEO_QUEUE_FRAMES);
+    expect(queues[1]).toBe(AUDIO_QUEUE_PACKETS);
+  });
+
+  it("uses the configured x264 preset", () => {
+    expect(captureArgs({ ...options, preset: "ultrafast" })[captureArgs({ ...options, preset: "ultrafast" }).indexOf("-preset") + 1]).toBe("ultrafast");
   });
 
   it("puts a keyframe every two seconds so seeking is quick", () => {

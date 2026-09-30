@@ -10,6 +10,8 @@ export type CallbackPayload = {
   durationSeconds?: number;
   sizeBytes?: number;
   reason?: string;
+  /** True when the recording stopped but the class was still going (crash, stall, length cap). */
+  interrupted?: boolean;
 };
 
 /**

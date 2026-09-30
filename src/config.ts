@@ -25,6 +25,8 @@ const schema = z.object({
   VIDEO_HEIGHT: z.coerce.number().int().default(720),
   VIDEO_FPS: z.coerce.number().int().min(10).max(60).default(24),
   VIDEO_CRF: z.coerce.number().int().min(15).max(35).default(22),
+  // x264 preset: "veryfast" balances size and CPU; "ultrafast" costs far less CPU (files ~2x larger at the same quality).
+  VIDEO_PRESET: z.enum(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]).default("veryfast"),
   S3_BUCKET: z.string().optional(),
   S3_REGION: z.string().default("auto"),
   S3_ENDPOINT: z.string().optional(),

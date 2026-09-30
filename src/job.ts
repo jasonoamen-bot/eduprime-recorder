@@ -36,6 +36,8 @@ export type JobRecord = {
   startedAt?: string;
   endedAt?: string;
   reason?: string;
+  /** The recording stopped but the class was still going — see isInterruption(). */
+  interrupted?: boolean;
   durationSeconds?: number;
   sizeBytes?: number;
   localPath?: string;
