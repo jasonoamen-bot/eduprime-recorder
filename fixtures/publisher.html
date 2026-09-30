@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Fake tutor (test publisher)</title></head>
+<body>
+<script src="/vendor/livekit-client.umd.js"></script>
+<script>
+// A fake tutor for tests: publishes Chromium's built-in fake camera (moving test
+// pattern) and fake microphone (a beep) into the room.
+window.__publisher = { state: "connecting" };
+const params = new URLSearchParams(location.search);
+const room = new LivekitClient.Room();
+room.connect(params.get("url"), params.get("token"))
+  .then(async () => {
+    await room.localParticipant.setCameraEnabled(true);
+    await room.localParticipant.setMicrophoneEnabled(true);
+    window.__publisher.state = "publishing";
+  })
+  .catch((e) => { console.error("publisher failed", e); window.__publisher.state = "failed"; });
+</script>
+</body>
+</html>

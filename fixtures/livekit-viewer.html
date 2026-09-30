@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Recorder viewer (test stand-in)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0b0e; color: #fff; font-family: system-ui, sans-serif; overflow: hidden; }
+  #main { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #16161c; }
+  #label { position: absolute; left: 24px; bottom: 24px; padding: 6px 14px; border-radius: 999px; background: rgba(0,0,0,.55); font-size: 20px; font-weight: 600; }
+  #wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #8a8a93; font-size: 26px; }
+</style>
+</head>
+<body>
+<div id="wait">Waiting for the tutor to join…</div>
+<video id="main" autoplay playsinline muted style="display:none"></video>
+<div id="label" style="display:none"></div>
+<div id="audio"></div>
+<script src="/vendor/livekit-client.umd.js"></script>
+<script>
+/*
+ * A STAND-IN for /live/egress-template, used only to test the recorder against a
+ * REAL LiveKit room without running the whole LMS. It follows the same contract
+ * (window.__recorder.state) and does the same essential job: join hidden, show the
+ * tutor's video, play every voice. The real page's layout logic is exercised
+ * separately.
+ */
+window.__recorder = { state: "connecting" };
+const params = new URLSearchParams(location.search);
+const room = new LivekitClient.Room();
+const video = document.getElementById("main");
+let sawSomeone = false;
+let emptySince = null;
+const EMPTY_GRACE_MS = 15000; // short here; the real page waits 2 minutes
+
+function refresh() {
+  const remotes = Array.from(room.remoteParticipants.values());
+  if (remotes.length > 0) { sawSomeone = true; emptySince = null; }
+  else if (sawSomeone && emptySince === null) { emptySince = Date.now(); }
+
+  const tutor = remotes.find((p) => { try { return JSON.parse(p.metadata || "{}").role === "tutor"; } catch { return false; } });
+  const pub = tutor && tutor.getTrackPublication(LivekitClient.Track.Source.Camera);
+  if (pub && pub.track) {
+    pub.track.attach(video);
+    video.style.display = "block";
+    document.getElementById("wait").style.display = "none";
+    const label = document.getElementById("label");
+    label.textContent = tutor.name || tutor.identity;
+    label.style.display = "block";
+  }
+}
+
+room
+  .on(LivekitClient.RoomEvent.ParticipantConnected, refresh)
+  .on(LivekitClient.RoomEvent.ParticipantDisconnected, refresh)
+  .on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === "audio") document.getElementById("audio").appendChild(track.attach());
+    refresh();
+  })
+  .on(LivekitClient.RoomEvent.TrackUnsubscribed, refresh)
+  .on(LivekitClient.RoomEvent.Disconnected, () => { window.__recorder.state = "ended"; });
+
+room.connect(params.get("url"), params.get("token"))
+  .then(() => { window.__recorder.state = "connected"; refresh(); })
+  .catch((e) => { console.error("connect failed", e); window.__recorder.state = "failed"; });
+
+setInterval(() => {
+  if (emptySince !== null && Date.now() - emptySince > EMPTY_GRACE_MS) window.__recorder.state = "ended";
+}, 1000);
+</script>
+</body>
+</html>
