@@ -15,6 +15,8 @@ const schema = z.object({
   RECORDER_SHARED_SECRET: z.string().min(32, "RECORDER_SHARED_SECRET must be at least 32 characters"),
   MAX_CONCURRENT_JOBS: z.coerce.number().int().min(1).default(2),
   MAX_JOB_MINUTES: z.coerce.number().int().min(1).default(240),
+  // How long the class page gets to load and join the room before a start attempt is given up.
+  PAGE_JOIN_TIMEOUT_SECONDS: z.coerce.number().int().min(10).default(45),
   SPOOL_DIR: z.string().default("/data/spool"),
   CHROMIUM_PATH: z.string().default("/usr/bin/chromium"),
   ALLOWED_PAGE_ORIGINS: origins,

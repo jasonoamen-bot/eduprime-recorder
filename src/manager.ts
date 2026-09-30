@@ -5,7 +5,7 @@ import { sendCallback } from "./callback.js";
 import type { Config } from "./config.js";
 import type { JobRecord, JobRequest, JobStatus } from "./job.js";
 import type { Logger } from "./log.js";
-import { finalizeFragment, RecordingSession, type SessionResult } from "./session.js";
+import { finalizeFragment, RecordingSession, StartCancelled, type SessionResult } from "./session.js";
 import type { Storage } from "./storage.js";
 
 export class AtCapacityError extends Error {
@@ -33,6 +33,7 @@ export class JobManager {
   private readonly jobs = new Map<string, JobRecord>();
   private readonly sessions = new Map<string, RecordingSession>();
   private readonly runs = new Set<Promise<void>>();
+  private readonly stopRequests = new Set<string>();
 
   constructor(
     private readonly config: Config,
@@ -81,9 +82,12 @@ export class JobManager {
   }
 
   stop(jobId: string): boolean {
-    const session = this.sessions.get(jobId);
-    if (!session) return false;
-    session.requestStop("stopped-by-lms");
+    const job = this.jobs.get(jobId);
+    if (!job || !ACTIVE.includes(job.status)) return false;
+    // Remembered separately from the session: a stop can arrive before a session
+    // exists (between start attempts) and must still win.
+    this.stopRequests.add(jobId);
+    this.sessions.get(jobId)?.requestStop("stopped-by-lms");
     return true;
   }
 
@@ -100,21 +104,26 @@ export class JobManager {
     // machine is transient, and a live class cannot be re-run.
     let session: RecordingSession | null = null;
     for (let attempt = 1; attempt <= START_ATTEMPTS && !session; attempt++) {
+      // A stop that arrived while starting (or between attempts) means: do not start at all.
+      if (this.stopRequests.has(job.request.jobId)) break;
       const candidate = new RecordingSession(job.request, this.config, log);
       this.sessions.set(job.request.jobId, candidate);
       try {
         await candidate.start();
         session = candidate;
       } catch (error) {
-        log.warn("start attempt failed", { attempt, error: String(error) });
+        const cancelled = error instanceof StartCancelled;
+        log.warn(cancelled ? "start cancelled" : "start attempt failed", { attempt, error: String(error) });
         await candidate.stop().catch(() => undefined);
+        if (cancelled) break; // never retry a start that was told to stop
       }
     }
 
     if (!session) {
       this.sessions.delete(job.request.jobId);
-      job.reason = "start-failed";
-      log.error("could not start recording after retries");
+      const wasStopped = this.stopRequests.has(job.request.jobId);
+      job.reason = wasStopped ? "stopped-before-start" : "start-failed";
+      if (!wasStopped) log.error("could not start recording after retries");
       await this.deliver(job, null, log);
       return;
     }

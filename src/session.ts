@@ -3,6 +3,7 @@ import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type { Config } from "./config.js";
+import { allocateDisplay, releaseDisplay } from "./displays.js";
 import { captureArgs, probeArgs, remuxArgs } from "./ffmpeg.js";
 import { pageUrlWithCredentials, type JobRequest } from "./job.js";
 import type { Logger } from "./log.js";
@@ -30,21 +31,22 @@ export type EndReason =
 
 export type SessionResult = { path: string; durationSeconds: number; sizeBytes: number };
 
-// Each concurrent session needs its own virtual screen and its own audio sink.
-const usedDisplays = new Set<number>();
-function allocateDisplay(): number {
-  for (let n = 101; n < 200; n++) {
-    if (!usedDisplays.has(n)) {
-      usedDisplays.add(n);
-      return n;
-    }
+/** Thrown when a stop was requested while still starting up: not a failure, do not retry. */
+export class StartCancelled extends Error {
+  constructor() {
+    super("start cancelled by a stop request");
   }
-  throw new Error("no free display numbers");
 }
 
-async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs: number, what: string): Promise<void> {
+async function waitFor(
+  check: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  what: string,
+  cancelled: () => boolean = () => false,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (cancelled()) throw new StartCancelled();
     if (await check()) return;
     await sleep(150);
   }
@@ -149,6 +151,7 @@ export class RecordingSession {
         async () => (await fetch(`http://127.0.0.1:${debugPort}/json/version`).catch(() => null))?.ok === true,
         20_000,
         "the browser to start",
+        () => this.endedFlag,
       );
       this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
       const context = this.browser.contexts()[0] ?? (await this.browser.newContext());
@@ -165,7 +168,12 @@ export class RecordingSession {
       await this.page.goto(pageUrlWithCredentials(this.request), { waitUntil: "domcontentloaded", timeout: 30_000 });
 
       // 4. Do not film a blank screen: wait until the page has really joined.
-      await waitFor(async () => (await this.pageState()) === "connected", 45_000, "the page to join the room");
+      await waitFor(
+        async () => (await this.pageState()) === "connected",
+        config.PAGE_JOIN_TIMEOUT_SECONDS * 1000,
+        "the page to join the room",
+        () => this.endedFlag,
+      );
 
       // 5. Roll tape.
       this.ffmpeg = run(
@@ -276,8 +284,16 @@ export class RecordingSession {
     }
     if (this.userDataDir) await rm(this.userDataDir, { recursive: true, force: true }).catch(() => undefined);
     if (this.sinkModule) await output("pactl", ["unload-module", this.sinkModule]).catch(() => undefined);
-    this.xvfb?.child.kill("SIGTERM");
-    usedDisplays.delete(this.displayNumber);
+    if (this.xvfb) {
+      // Wait for it to really be gone before the number can be reused, and clear
+      // the lock files a hard kill leaves behind.
+      this.xvfb.child.kill("SIGTERM");
+      const gone = await Promise.race([this.xvfb.exited.then(() => true), sleep(5_000).then(() => false)]);
+      if (!gone) this.xvfb.child.kill("SIGKILL");
+      await rm(`/tmp/.X${this.displayNumber}-lock`, { force: true }).catch(() => undefined);
+      await rm(`/tmp/.X11-unix/X${this.displayNumber}`, { force: true }).catch(() => undefined);
+    }
+    if (this.displayNumber) releaseDisplay(this.displayNumber);
 
     if (!existsSync(this.fragPath)) return null;
     return finalizeFragment(this.fragPath, this.finalPath, log);

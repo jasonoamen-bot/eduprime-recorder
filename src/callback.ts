@@ -32,7 +32,10 @@ export async function sendCallback(url: string, secret: string, payload: Callbac
         body,
         signal: AbortSignal.timeout(15_000),
       });
-      if (response.ok) return true;
+      if (response.ok) {
+        log.info("callback delivered", { status: response.status, callbackStatus: payload.status });
+        return true;
+      }
       // 4xx means the LMS understood and refused: retrying will not help.
       if (response.status >= 400 && response.status < 500) {
         log.error("callback refused", { status: response.status });
