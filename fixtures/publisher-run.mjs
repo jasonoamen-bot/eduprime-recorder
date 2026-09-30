@@ -6,10 +6,15 @@ import { chromium } from "playwright-core";
 const [pageUrl, secondsArg] = process.argv.slice(2);
 const seconds = Number(secondsArg || 60);
 
+// Camera and microphone only exist on "secure" pages. The test page is served
+// from the host over plain http, so tell this throwaway browser to trust that one origin.
+const origin = new URL(pageUrl).origin;
+
 const browser = await chromium.launch({
   executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",
   headless: true,
   args: [
+    `--unsafely-treat-insecure-origin-as-secure=${origin}`,
     "--no-sandbox",
     "--disable-dev-shm-usage",
     "--use-fake-device-for-media-stream",

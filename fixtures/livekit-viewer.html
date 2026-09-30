@@ -34,6 +34,10 @@ const EMPTY_GRACE_MS = 15000; // short here; the real page waits 2 minutes
 
 function refresh() {
   const remotes = Array.from(room.remoteParticipants.values());
+  window.__recorder.remotes = remotes.map((p) => ({
+    id: p.identity, meta: p.metadata,
+    tracks: Array.from(p.trackPublications.values()).map((t) => `${t.source}:${t.isSubscribed ? "sub" : "unsub"}:${t.track ? "hastrack" : "notrack"}`),
+  }));
   if (remotes.length > 0) { sawSomeone = true; emptySince = null; }
   else if (sawSomeone && emptySince === null) { emptySince = Date.now(); }
 

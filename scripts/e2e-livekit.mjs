@@ -91,6 +91,7 @@ rmSync(outDir, { recursive: true, force: true }); mkdirSync(outDir, { recursive:
 for (const n of ["er-lk-recorder", "er-lk-publisher"]) spawnSync("docker", ["rm", "-f", n], { stdio: "ignore" });
 const common = ["--add-host", `${HOST}:host-gateway`, "-v", `${fixtures}:/app/fixtures:ro`, "--shm-size=512m"];
 let recorderPeak = { cpu: 0, mem: "" };
+let audioMean = -Infinity;
 let ok = false;
 try {
   console.log("starting recorder (capped: 2 CPUs, 1.5 GB)…");
@@ -137,10 +138,13 @@ try {
     console.log(sh(["exec", "er-lk-recorder", "ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name,width,height,r_frame_rate:format=duration,size", "-of", "compact", file]));
     const vol = spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-i", file, "-af", "volumedetect", "-vn", "-f", "null", "-"], { encoding: "utf8" });
     console.log((vol.stderr.match(/(mean_volume|max_volume).*/g) || ["no audio level"]).join("\n"));
+    // A silent recording is a failed recording (the first version of this test "passed" with -91 dB).
+    audioMean = Number((vol.stderr.match(/mean_volume:\s*(-?[\d.]+)/) || [])[1] ?? -Infinity);
     for (const t of [8, 25]) spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-y", "-ss", String(t), "-i", file, "-frames:v", "1", `/out/live-frame-${t}s.png`], { stdio: "ignore" });
     console.log("frames saved in", outDir);
   }
-  ok = job.status === "done" && callbacks.some((c) => c.verdict.ok && c.parsed);
+  console.log(`audio mean ${audioMean} dB (must be louder than -50 dB)`);
+  ok = job.status === "done" && audioMean > -50 && callbacks.some((c) => c.verdict.ok && c.parsed);
 } finally {
   server.close();
   try { await new RoomServiceClient(vars.LIVEKIT_URL.replace(/^wss:/, "https:"), vars.LIVEKIT_API_KEY, vars.LIVEKIT_API_SECRET).deleteRoom(roomName); } catch {}

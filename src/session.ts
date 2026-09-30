@@ -154,6 +154,13 @@ export class RecordingSession {
       const context = this.browser.contexts()[0] ?? (await this.browser.newContext());
       this.page = context.pages()[0] ?? (await context.waitForEvent("page"));
       this.page.on("pageerror", (error) => log.warn("page error", { error: String(error).slice(0, 300) }));
+      // What the class page says to itself is the first place to look when a
+      // recording comes out wrong, so keep its warnings and errors in our log.
+      this.page.on("console", (message) => {
+        if (message.type() === "error" || message.type() === "warning") {
+          log.warn("page console", { type: message.type(), text: message.text().slice(0, 300) });
+        }
+      });
       this.page.on("crash", () => this.end("page-crashed"));
       await this.page.goto(pageUrlWithCredentials(this.request), { waitUntil: "domcontentloaded", timeout: 30_000 });
 
@@ -207,9 +214,18 @@ export class RecordingSession {
 
   private watch(): void {
     const maxMs = (this.request.maxMinutes ?? this.config.MAX_JOB_MINUTES) * 60_000;
+    let tick = 0;
     this.timer = setInterval(() => {
       void (async () => {
         if (this.endedFlag) return;
+        // Every ~10s, a snapshot of what the page believes: cheap, and it turns
+        // "the recording is blank" from a mystery into a log line.
+        if (++tick % 5 === 0 && this.page) {
+          const snapshot = await this.page
+            .evaluate(() => JSON.stringify((window as unknown as { __recorder?: unknown }).__recorder ?? null))
+            .catch(() => null);
+          this.log.info("page snapshot", { snapshot });
+        }
         if (Date.now() - this.startedAt > maxMs) return this.end("max-duration");
         const state = await this.pageState();
         if (state === "ended") return this.end("room-ended");
