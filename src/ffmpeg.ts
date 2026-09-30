@@ -25,7 +25,8 @@ export function captureArgs(options: CaptureOptions): string[] {
     "-hide_banner",
     "-loglevel", "warning",
     "-y",
-    // picture
+    // picture (the deep input queue stops a busy CPU dropping frames)
+    "-thread_queue_size", "1024",
     "-use_wallclock_as_timestamps", "1",
     "-f", "x11grab",
     "-framerate", String(fps),
@@ -33,6 +34,7 @@ export function captureArgs(options: CaptureOptions): string[] {
     "-draw_mouse", "0",
     "-i", `${display}.0`,
     // sound
+    "-thread_queue_size", "1024",
     "-use_wallclock_as_timestamps", "1",
     "-f", "pulse",
     "-i", audioSource,

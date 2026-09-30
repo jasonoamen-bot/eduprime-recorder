@@ -32,6 +32,10 @@ describe("capture command", () => {
     expect(after("-af")).toContain("aresample=async=1");
   });
 
+  it("buffers both inputs deeply so a busy CPU does not drop frames", () => {
+    expect(args.filter((arg) => arg === "-thread_queue_size")).toHaveLength(2);
+  });
+
   it("puts a keyframe every two seconds so seeking is quick", () => {
     expect(after("-g")).toBe("48");
   });

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type { Config } from "./config.js";
@@ -65,7 +65,9 @@ export class RecordingSession {
   private sinkModule: string | null = null;
   private xvfb: Running | null = null;
   private ffmpeg: Running | null = null;
+  private chromium: Running | null = null;
   private browser: Browser | null = null;
+  private userDataDir: string | null = null;
   private page: Page | null = null;
   private timer: NodeJS.Timeout | null = null;
   private startedAt = 0;
@@ -106,15 +108,29 @@ export class RecordingSession {
       this.sinkModule = await output("pactl", ["load-module", "module-null-sink", `sink_name=${this.sink}`]);
 
       // 3. A browser pointed at the class.
-      this.browser = await chromium.launch({
-        executablePath: config.CHROMIUM_PATH,
-        headless: false,
-        env: { ...process.env, DISPLAY: this.display, PULSE_SINK: this.sink } as Record<string, string>,
-        ignoreDefaultArgs: ["--enable-automation", "--mute-audio"],
-        args: [
+      //
+      // `--app=` opens a CHROMELESS window: no tabs, no address bar. That matters
+      // twice over: the recording is only the class, and the address bar would
+      // otherwise show the room token to every student who watches the replay.
+      // (`--kiosk` does nothing here: there is no window manager on the virtual
+      // screen to make the window fullscreen.)
+      //
+      // We start Chromium OURSELVES rather than through Playwright: Playwright
+      // ignores `--app` and opens a normal window, address bar and all. It
+      // attaches afterwards over the debugging port, only to read page state.
+      this.userDataDir = join(config.SPOOL_DIR, `chrome-${this.request.jobId}`);
+      const debugPort = 9000 + this.displayNumber;
+      this.chromium = run(
+        config.CHROMIUM_PATH,
+        [
+          // Chromium only treats `--app` as an app window for a real URL; the
+          // blank page is silently opened as a normal tabbed window.
+          "--app=data:text/html,<title>recorder</title><body style='background:%230b0b0e'>",
+          `--user-data-dir=${this.userDataDir}`,
+          `--remote-debugging-port=${debugPort}`,
           "--no-sandbox",
+          "--test-type", // silences the "unsupported flag: --no-sandbox" banner
           "--disable-dev-shm-usage",
-          "--kiosk",
           `--window-size=${config.VIDEO_WIDTH},${config.VIDEO_HEIGHT}`,
           "--window-position=0,0",
           "--force-device-scale-factor=1",
@@ -122,12 +138,21 @@ export class RecordingSession {
           "--disable-infobars",
           "--hide-scrollbars",
           "--no-first-run",
+          "--no-default-browser-check",
           "--disable-features=Translate",
         ],
-      });
-      this.browser.on("disconnected", () => this.end("page-crashed"));
-      const context = await this.browser.newContext({ viewport: null });
-      this.page = await context.newPage();
+        log,
+        { ...process.env, DISPLAY: this.display, PULSE_SINK: this.sink },
+      );
+      void this.chromium.exited.then(() => this.end("page-crashed"));
+      await waitFor(
+        async () => (await fetch(`http://127.0.0.1:${debugPort}/json/version`).catch(() => null))?.ok === true,
+        20_000,
+        "the browser to start",
+      );
+      this.browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`);
+      const context = this.browser.contexts()[0] ?? (await this.browser.newContext());
+      this.page = context.pages()[0] ?? (await context.waitForEvent("page"));
       this.page.on("pageerror", (error) => log.warn("page error", { error: String(error).slice(0, 300) }));
       this.page.on("crash", () => this.end("page-crashed"));
       await this.page.goto(pageUrlWithCredentials(this.request), { waitUntil: "domcontentloaded", timeout: 30_000 });
@@ -227,7 +252,13 @@ export class RecordingSession {
       }
     }
 
-    await this.browser?.close().catch(() => undefined);
+    await this.browser?.close().catch(() => undefined); // detaches; does not stop the process
+    if (this.chromium) {
+      this.chromium.child.kill("SIGTERM");
+      const gone = await Promise.race([this.chromium.exited.then(() => true), sleep(5_000).then(() => false)]);
+      if (!gone) this.chromium.child.kill("SIGKILL");
+    }
+    if (this.userDataDir) await rm(this.userDataDir, { recursive: true, force: true }).catch(() => undefined);
     if (this.sinkModule) await output("pactl", ["unload-module", this.sinkModule]).catch(() => undefined);
     this.xvfb?.child.kill("SIGTERM");
     usedDisplays.delete(this.displayNumber);

@@ -15,6 +15,7 @@ export class AtCapacityError extends Error {
 }
 
 const ACTIVE: JobStatus[] = ["starting", "recording", "finalising", "uploading"];
+const START_ATTEMPTS = 2;
 
 /**
  * Owns every recording job: accepts them, runs them, survives restarts.
@@ -94,23 +95,36 @@ export class JobManager {
 
   private async execute(job: JobRecord): Promise<void> {
     const log = this.log.child({ jobId: job.request.jobId, room: job.request.roomName });
-    const session = new RecordingSession(job.request, this.config, log);
-    this.sessions.set(job.request.jobId, session);
+
+    // One retry on start: a browser or virtual screen that hiccups on a busy
+    // machine is transient, and a live class cannot be re-run.
+    let session: RecordingSession | null = null;
+    for (let attempt = 1; attempt <= START_ATTEMPTS && !session; attempt++) {
+      const candidate = new RecordingSession(job.request, this.config, log);
+      this.sessions.set(job.request.jobId, candidate);
+      try {
+        await candidate.start();
+        session = candidate;
+      } catch (error) {
+        log.warn("start attempt failed", { attempt, error: String(error) });
+        await candidate.stop().catch(() => undefined);
+      }
+    }
+
+    if (!session) {
+      this.sessions.delete(job.request.jobId);
+      job.reason = "start-failed";
+      log.error("could not start recording after retries");
+      await this.deliver(job, null, log);
+      return;
+    }
 
     let result: SessionResult | null = null;
     try {
-      await session.start();
       await this.setStatus(job, "recording", { startedAt: new Date().toISOString() });
-      const reason = await session.ended;
-      job.reason = reason;
+      job.reason = await session.ended;
       await this.setStatus(job, "finalising");
       result = await session.stop();
-    } catch (error) {
-      job.reason = "start-failed";
-      log.error("job failed before recording", { error: String(error) });
-      await session.stop().catch(() => undefined);
-      // A failed start may still have left partial footage; fall through and see.
-      result = existsSync(session.fragPath) ? await finalizeFragment(session.fragPath, session.finalPath, log) : null;
     } finally {
       this.sessions.delete(job.request.jobId);
     }
