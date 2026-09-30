@@ -26,6 +26,8 @@ const schema = z.object({
   VIDEO_FPS: z.coerce.number().int().min(10).max(60).default(24),
   VIDEO_CRF: z.coerce.number().int().min(15).max(35).default(22),
   // x264 preset: "veryfast" balances size and CPU; "ultrafast" costs far less CPU (files ~2x larger at the same quality).
+  // Extra Chromium flags, space separated (e.g. "--disable-gpu --disable-gpu-compositing"). For tuning CPU use.
+  CHROMIUM_EXTRA_ARGS: z.string().default(""),
   VIDEO_PRESET: z.enum(["ultrafast", "superfast", "veryfast", "faster", "fast", "medium"]).default("veryfast"),
   S3_BUCKET: z.string().optional(),
   S3_REGION: z.string().default("auto"),

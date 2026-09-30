@@ -11,8 +11,8 @@
 //   - containers are CPU- and memory-capped
 //   - touches no database, deploys nothing
 import { randomBytes } from "node:crypto";
-import { execFileSync, spawnSync } from "node:child_process";
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createReadStream, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { cpus, freemem } from "node:os";
@@ -135,8 +135,29 @@ const RECORDER_CPUS = Number(process.env.RECORDER_CPUS || 2);
 const RECORDER_MEM = Number(process.env.RECORDER_MEM || 1500);
 // The fake tutor is the test rig, not the thing under test: give it enough CPU that it is not the weak link.
 const PUBLISHER_CPUS = Number(process.env.PUBLISHER_CPUS || 1);
+// PUBLISHER=go: use tools/loadpub (pre-encoded media, ~no CPU) instead of a browser-based fake tutor, so the
+// machine's CPU is spent on the recorder being measured, not on the test rig.
+const PUBLISHER_GO = process.env.PUBLISHER === "go";
+let goPub = null;
 const series = [];
 let lastSample = 0;
+// PROFILE=1: which part of the recorder uses the CPU? Snapshot cumulative CPU seconds per process group
+// ~75 s into the recording and again near the end; the difference over the time between = cores used.
+const PROFILE = process.env.PROFILE;
+let recordingSeenAt = 0, prof1 = null, profLast = null, lastProf = 0;
+const classify = (a) => /ffmpeg/.test(a) ? "ffmpeg (encode)" : /Xvfb/.test(a) ? "Xvfb (virtual screen)" : /pulseaudio/.test(a) ? "pulseaudio"
+  : /--type=gpu-process/.test(a) ? "chromium GPU process" : /--type=renderer/.test(a) ? "chromium renderer (page + video decode)"
+  : /--type=utility/.test(a) ? "chromium utility (network/audio)" : /--type=zygote/.test(a) ? "chromium zygote"
+  : /chromium|chrome/.test(a) ? "chromium browser process" : /node/.test(a) ? "recorder (node)" : "other";
+function psSnapshot() {
+  const out = sh(["exec", "er-lk-recorder", "ps", "-eo", "pid=,cputimes=,args="]);
+  const groups = {};
+  for (const line of out.split("\n")) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (m) { const g = classify(m[3]); groups[g] = (groups[g] || 0) + Number(m[2]); }
+  }
+  return { t: Date.now(), groups };
+}
 const soakStart = Date.now();
 const toMiB = (s) => { const n = parseFloat(s); return /GiB/i.test(s) ? n * 1024 : /KiB/i.test(s) ? n / 1024 : n; };
 let audioMean = -Infinity;
@@ -144,7 +165,8 @@ let ok = false;
 try {
   console.log(`starting recorder (capped: ${RECORDER_CPUS} CPUs, ${RECORDER_MEM} MB${process.env.VIDEO_PRESET ? ", preset " + process.env.VIDEO_PRESET : ""})…`);
   sh(["run", "-d", "--name", "er-lk-recorder", `--cpus=${RECORDER_CPUS}`, `--memory=${RECORDER_MEM}m`, `--memory-swap=${RECORDER_MEM}m`, "-p", "8787:8787", ...common,
-    ...(process.env.VIDEO_PRESET ? ["-e", `VIDEO_PRESET=${process.env.VIDEO_PRESET}`] : []),
+    // Tuning knobs passed straight through when set (presets, frame rate, size, browser flags).
+    ...["VIDEO_PRESET", "VIDEO_FPS", "VIDEO_WIDTH", "VIDEO_HEIGHT", "VIDEO_CRF", "CHROMIUM_EXTRA_ARGS"].flatMap((k) => (process.env[k] ? ["-e", `${k}=${process.env[k]}`] : [])),
     "-v", `${outDir}:/out`, "-e", `RECORDER_SHARED_SECRET=${secret}`,
     // S3_TEST: the recorder uploads through its real S3 code to the local MinIO; otherwise it just copies files.
     ...(S3_TEST
@@ -159,7 +181,23 @@ try {
   const tutorToken = await at.toJwt();
   const pubUrl = `${localBase}/publisher.html?url=${encodeURIComponent(vars.LIVEKIT_URL)}&token=${encodeURIComponent(tutorToken)}`;
   console.log(`starting fake tutor in room ${roomName} for ${publishSeconds}s (capped: ${PUBLISHER_CPUS} CPU, 0.8 GB)…`);
-  sh(["run", "-d", "--name", "er-lk-publisher", `--cpus=${PUBLISHER_CPUS}`, "--memory=800m", "--memory-swap=800m", ...common, "--entrypoint", "/usr/bin/tini", IMAGE, "--", "node", "fixtures/publisher-run.mjs", pubUrl, String(publishSeconds + 12)]);
+  if (PUBLISHER_GO) {
+    // Its log is very chatty (WebRTC internals): keep it in a file, and only trust the tutor once it says it is publishing.
+    mkdirSync(outDir, { recursive: true });
+    const pubLogPath = join(outDir, "loadpub.log");
+    const pubLog = openSync(pubLogPath, "w");
+    goPub = spawn(join("tools", "loadpub", "loadpub.exe"), ["--url", vars.LIVEKIT_URL, "--token", tutorToken, "--video", join("tools", "loadpub", "media", "video.ivf"), "--audio", join("tools", "loadpub", "media", "audio.ogg"), "--seconds", String(publishSeconds + 12)], { stdio: ["ignore", pubLog, pubLog] });
+    let pubExited = false;
+    goPub.on("exit", () => { pubExited = true; });
+    let ready = false;
+    for (let i = 0; i < 180 && !ready; i++) {
+      await sleep(500);
+      ready = /publishing for/.test(readFileSync(pubLogPath, "utf8"));
+      if (pubExited && !ready) throw new Error("the fake tutor could not join the room (see out/loadpub.log)");
+    }
+    if (!ready) throw new Error("the fake tutor never started publishing (see out/loadpub.log)");
+    console.log("fake tutor is publishing (light Go publisher)");
+  } else sh(["run", "-d", "--name", "er-lk-publisher", `--cpus=${PUBLISHER_CPUS}`, "--memory=800m", "--memory-swap=800m", ...common, "--entrypoint", "/usr/bin/tini", IMAGE, "--", "node", "fixtures/publisher-run.mjs", pubUrl, String(publishSeconds + 12)]);
   await sleep(10_000);
 
   // The LMS's own code starts the recording — token minting, signing, URLs and all.
@@ -167,7 +205,19 @@ try {
   console.log("LMS startRecorderJob ->", JSON.stringify(started));
   if (!started.ok) throw new Error("the LMS could not start the recorder: " + JSON.stringify(started));
 
-  const view = async () => (await (await fetch(`http://127.0.0.1:8787/v1/jobs/${started.jobId}`, { headers: (() => { const t = String(Date.now()); return { "x-recorder-timestamp": t, "x-recorder-signature": lms.signRecorderBody(secret, t, "") }; })() })).json()).job;
+  // Docker's port forwarding drops a request now and then when the laptop is saturated: retry instead of dying.
+  const view = async () => {
+    let lastError;
+    for (let attempt = 1; attempt <= 8; attempt++) {
+      try {
+        return (await (await fetch(`http://127.0.0.1:8787/v1/jobs/${started.jobId}`, { headers: (() => { const t = String(Date.now()); return { "x-recorder-timestamp": t, "x-recorder-signature": lms.signRecorderBody(secret, t, "") }; })() })).json()).job;
+      } catch (error) {
+        lastError = error;
+        await sleep(1500 * attempt);
+      }
+    }
+    throw lastError;
+  };
   let job;
   // The fake tutor leaves at about (start + publishSeconds + 12 + a few s of browser startup).
   // STOP=1 then ends the recording the way the LMS's "End class" does (stopRecorderJob),
@@ -182,6 +232,11 @@ try {
     }
     job = await view();
     if (i % 5 === 0) console.log("  recorder:", job.status);
+    if (PROFILE && job.status === "recording") {
+      recordingSeenAt ||= Date.now();
+      if (!prof1 && Date.now() - recordingSeenAt > 75_000) { prof1 = psSnapshot(); lastProf = Date.now(); }
+      else if (prof1 && Date.now() - lastProf > 15_000) { profLast = psSnapshot(); lastProf = Date.now(); }
+    }
     // SOAK samples every 30 s (a `docker stats` call is slow and there are ~900 polls in 30 minutes).
     if (job.status === "recording" && Date.now() - lastSample >= (SOAK ? 30_000 : 0)) {
       lastSample = Date.now();
@@ -191,6 +246,14 @@ try {
       if (SOAK && series.length % 10 === 0) console.log(`  [soak ${Math.round(series.at(-1).t / 60)} min] cpu ${series.at(-1).cpu}%  mem ${series.at(-1).memMiB.toFixed(0)} MiB`);
     }
     if (job.status === "done" || job.status === "failed") break;
+  }
+  if (PROFILE && prof1 && profLast) {
+    const secs = (profLast.t - prof1.t) / 1000;
+    const rows = Object.keys(profLast.groups).map((g) => [g, ((profLast.groups[g] - (prof1.groups[g] || 0)) / secs)]).sort((a, b) => b[1] - a[1]);
+    console.log(`\nCPU BY PART (cores used, averaged over ${secs.toFixed(0)} s of steady recording):`);
+    for (const [g, c] of rows) console.log(`   ${c.toFixed(2).padStart(5)}  ${g}`);
+    console.log(`   ${rows.reduce((s, r) => s + r[1], 0).toFixed(2).padStart(5)}  TOTAL`);
+    console.log("PROFILE " + JSON.stringify(Object.fromEntries(rows.map(([g, c]) => [g, +c.toFixed(2)]))));
   }
   console.log("final job:", JSON.stringify({ status: job.status, reason: job.reason, seconds: job.durationSeconds, bytes: job.sizeBytes }));
   console.log(`recorder peak: ${recorderPeak.cpu}% of one core (limit 200%), memory ${recorderPeak.mem}`);
@@ -309,6 +372,7 @@ try {
   ok = job.status === "done" && audioMean > -50 && delivered && storageOk;
 } finally {
   server.close();
+  try { goPub?.kill(); } catch {}
   try { await new RoomServiceClient(vars.LIVEKIT_URL.replace(/^wss:/, "https:"), vars.LIVEKIT_API_KEY, vars.LIVEKIT_API_SECRET).deleteRoom(roomName); } catch {}
   if (!process.env.KEEP) for (const n of ["er-lk-recorder", "er-lk-publisher"]) spawnSync("docker", ["rm", "-f", n], { stdio: "ignore" });
 }

@@ -166,6 +166,7 @@ export class RecordingSession {
           "--no-first-run",
           "--no-default-browser-check",
           "--disable-features=Translate",
+          ...config.CHROMIUM_EXTRA_ARGS.split(/\s+/).filter(Boolean),
         ],
         log,
         { ...process.env, DISPLAY: this.display, PULSE_SINK: this.sink },

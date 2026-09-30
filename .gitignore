@@ -7,3 +7,5 @@ spool/
 .stage/
 out/
 *.log
+tools/loadpub/media/
+tools/loadpub/loadpub.exe
