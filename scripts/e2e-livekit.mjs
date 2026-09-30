@@ -133,6 +133,8 @@ const SOAK = process.env.SOAK;
 // What the recorder container may use. Real classes need ~3 cores; the default is what the first tests used.
 const RECORDER_CPUS = Number(process.env.RECORDER_CPUS || 2);
 const RECORDER_MEM = Number(process.env.RECORDER_MEM || 1500);
+// The fake tutor is the test rig, not the thing under test: give it enough CPU that it is not the weak link.
+const PUBLISHER_CPUS = Number(process.env.PUBLISHER_CPUS || 1);
 const series = [];
 let lastSample = 0;
 const soakStart = Date.now();
@@ -156,8 +158,8 @@ try {
   at.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
   const tutorToken = await at.toJwt();
   const pubUrl = `${localBase}/publisher.html?url=${encodeURIComponent(vars.LIVEKIT_URL)}&token=${encodeURIComponent(tutorToken)}`;
-  console.log(`starting fake tutor in room ${roomName} for ${publishSeconds}s (capped: 1 CPU, 0.8 GB)…`);
-  sh(["run", "-d", "--name", "er-lk-publisher", "--cpus=1", "--memory=800m", "--memory-swap=800m", ...common, "--entrypoint", "/usr/bin/tini", IMAGE, "--", "node", "fixtures/publisher-run.mjs", pubUrl, String(publishSeconds + 12)]);
+  console.log(`starting fake tutor in room ${roomName} for ${publishSeconds}s (capped: ${PUBLISHER_CPUS} CPU, 0.8 GB)…`);
+  sh(["run", "-d", "--name", "er-lk-publisher", `--cpus=${PUBLISHER_CPUS}`, "--memory=800m", "--memory-swap=800m", ...common, "--entrypoint", "/usr/bin/tini", IMAGE, "--", "node", "fixtures/publisher-run.mjs", pubUrl, String(publishSeconds + 12)]);
   await sleep(10_000);
 
   // The LMS's own code starts the recording — token minting, signing, URLs and all.
@@ -232,6 +234,7 @@ try {
       // The fake camera never stops moving, so a frozen picture means the recorder stalled.
       const fz = spawnSync("docker", ["exec", "er-lk-recorder", "ffmpeg", "-i", file, "-vf", "freezedetect=n=-55dB:d=2", "-an", "-f", "null", "-"], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
       const freezes = (fz.stderr.match(/freeze_start/g) || []).length;
+      const frozenSeconds = [...fz.stderr.matchAll(/freeze_duration:\s*([\d.]+)/g)].reduce((s, m) => s + Number(m[1]), 0);
       check("no frozen-picture stalls of 2 s or more", freezes === 0, `(${freezes} found)`);
       const q = Math.max(3, Math.floor(series.length / 4));
       const avg = (xs) => xs.reduce((s, x) => s + x.memMiB, 0) / xs.length;
@@ -241,6 +244,16 @@ try {
       check("peak memory stays under 85% of the container's limit", peak < RECORDER_MEM * 0.85);
       const cpus = series.map((s) => s.cpu);
       console.log(`   cpu over time: min ${Math.min(...cpus)}%  avg ${(cpus.reduce((x, y) => x + y, 0) / cpus.length).toFixed(0)}%  max ${Math.max(...cpus)}%  (limit ${RECORDER_CPUS * 100}%)`);
+      // How often the OS had to hold the recorder back because it wanted more CPU than its allowance.
+      const stat = Object.fromEntries(sh(["exec", "er-lk-recorder", "sh", "-c", "cat /sys/fs/cgroup/cpu.stat"]).split("\n").map((l) => l.split(" ")));
+      const throttledPct = (Number(stat.nr_throttled) / Number(stat.nr_periods)) * 100;
+      const summary = {
+        preset: process.env.VIDEO_PRESET || "veryfast", recorderCpus: RECORDER_CPUS, publisherCpus: PUBLISHER_CPUS, minutes: +(vd / 60).toFixed(1),
+        throttledPct: +throttledPct.toFixed(1), avgCpuPct: +(cpus.reduce((x, y) => x + y, 0) / cpus.length).toFixed(0), maxCpuPct: Math.max(...cpus),
+        freezes, frozenSeconds: +frozenSeconds.toFixed(1), frozenPct: +((frozenSeconds / vd) * 100).toFixed(2),
+        peakMemMiB: Math.round(peak), avDiffSec: +(vd - ad).toFixed(2), mbPerMin: +((job.sizeBytes / 1e6) / (vd / 60)).toFixed(2),
+      };
+      console.log("SUMMARY " + JSON.stringify(summary));
       console.log("   series (min: cpu% / MiB):", series.filter((_, i) => i % 6 === 0).map((s) => `${Math.round(s.t / 60)}:${s.cpu.toFixed(0)}/${s.memMiB.toFixed(0)}`).join("  "));
     }
 
