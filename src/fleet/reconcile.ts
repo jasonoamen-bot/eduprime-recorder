@@ -30,8 +30,9 @@ export function reconcile(input: { now: Date; servers: ServerState[]; config: Fl
   const classesOf = (typeId: string) => typeById.get(typeId)?.classes ?? 0;
   const ageMinutes = (s: ServerState) => (now.getTime() - s.createdAt.getTime()) / MIN;
 
-  const needCreate = demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN));
-  const needKeep = Math.max(needCreate, demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN)));
+  const withSpare = (peak: number) => (peak > 0 ? peak + Math.max(0, config.spareClasses ?? 0) : 0);
+  const needCreate = withSpare(demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN)));
+  const needKeep = Math.max(needCreate, withSpare(demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN))));
 
   const actions: Action[] = [];
   const notes: string[] = [];

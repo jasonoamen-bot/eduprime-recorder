@@ -198,3 +198,19 @@ describe("a simulated month", () => {
     expect(week.byDay.find((d) => d.date === "2026-10-07")?.usd ?? 0).toBe(0);
   });
 });
+
+describe("reconcile: spare capacity", () => {
+  const spare = { ...DEFAULT_CONFIG, spareClasses: 1 };
+  it("plans one class of headroom on top of the timetable", () => {
+    const decision = reconcile({ now: monday("08:45"), servers: [], config: spare });
+    expect(decision.need.create).toBe(6); // 5 scheduled + 1 spare
+    const classes = decision.actions.reduce((sum, a) => sum + (a.kind === "create" ? DEFAULT_TYPES.find((t) => t.id === a.typeId)!.classes : 0), 0);
+    expect(classes).toBeGreaterThanOrEqual(6);
+  });
+  it("costs nothing when no class is expected: no spare server is kept for an empty day", () => {
+    expect(reconcile({ now: monday("03:00"), servers: [], config: spare })).toMatchObject({ actions: [], need: { create: 0, keep: 0 } });
+  });
+  it("default is no spare, as before", () => {
+    expect(DEFAULT_CONFIG.spareClasses).toBe(0);
+  });
+});

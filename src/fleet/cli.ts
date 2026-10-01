@@ -54,7 +54,9 @@ const apply = flag("apply");
 function loadConfig(): FleetConfig {
   const file = join(repo, "fleet.config.json");
   const overrides = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<FleetConfig>) : {};
-  const config = { ...DEFAULT_CONFIG, ...overrides };
+  // One class of headroom by default: a surprise class lands on a free slot instead of waiting for a new server (FLEET_SPARE_CLASSES=0 turns it off).
+  const spare = Number(env.FLEET_SPARE_CLASSES);
+  const config = { ...DEFAULT_CONFIG, spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : 1, ...overrides };
   // A pause switch: nothing new is created, but servers still get deleted (so a pause can never leave money running).
   return env.FLEET_PAUSE_CREATES === "1" ? { ...config, maxCreatesPerTick: 0 } : config;
 }

@@ -34,6 +34,7 @@ export const DEFAULT_CONFIG: FleetConfig = {
   skipDates: [],
   leadMinutes: 20,
   keepMinutes: 60,
+  spareClasses: 0,
   maxServers: 4,
   maxCreatesPerTick: 3,
   maxAgeHours: 8,
