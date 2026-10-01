@@ -79,3 +79,7 @@ Both are checked before anything goes live: the rented-server test gives the rea
   3. **The 8-core and 16-core servers through the fleet** (only the 2-core size has been created by the fleet manager so far).
 - **Still to test:** a larger server (8 cores; only the 2-core size has been created through the fleet manager so far, and the account may have limits), two classes at once through the fleet, a 90-minute class, screen sharing, and a side-by-side quality check against today's recordings.
 - **Before going live:** the pilot on one real class (needs the LMS change merged and deployed; the setting is off by default, so merging changes nothing until it is switched on).
+
+## Plan limits on a new Linode account
+
+A new account may not be allowed the 8- and 16-vCPU plans (`HTTP 400: A limit on your account...`; lifted by a Linode support request, naming the plan). Until then set `FLEET_TYPES=g6-dedicated-2,g6-dedicated-4` in `.env`: the planner uses only those. Price per class is the same, so only the number of servers changes (5 classes plus one spare = three 4-vCPU servers). Checked 2026-10-02: 8 and 16 refused on this account, 2 and 4 work. If more than 8 classes are ever needed at once, raise `maxServers` in `fleet.config.json`.

@@ -58,6 +58,15 @@ function loadConfig(): FleetConfig {
   const spare = Number(env.FLEET_SPARE_CLASSES);
   const config = { ...DEFAULT_CONFIG, spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : 1, ...overrides };
   // A pause switch: nothing new is created, but servers still get deleted (so a pause can never leave money running).
+  // A new Linode account may not be allowed the big plans (its limit, lifted by a support request): FLEET_TYPES=g6-dedicated-2,g6-dedicated-4
+  // keeps the planner to the plans that can really be created. Cost per class is the same, so only the server count changes.
+  if (env.FLEET_TYPES) {
+    const wanted = env.FLEET_TYPES.split(",").map((s) => s.trim()).filter(Boolean);
+    const known = new Set(config.types.map((t) => t.id));
+    const unknown = wanted.filter((id) => !known.has(id));
+    if (unknown.length) throw new Error(`FLEET_TYPES has unknown plan(s): ${unknown.join(", ")}`);
+    config.types = config.types.filter((t) => wanted.includes(t.id));
+  }
   return env.FLEET_PAUSE_CREATES === "1" ? { ...config, maxCreatesPerTick: 0 } : config;
 }
 
