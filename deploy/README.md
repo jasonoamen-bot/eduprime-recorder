@@ -44,10 +44,24 @@ Hetzner charges while a server *exists*, even if switched off. When the test is 
 - Nothing on this server can reach your students' data or the school website.
 
 ## If Hetzner will not take your card
-Any of these work the same way; pick **Ubuntu 24.04**, **4 dedicated/CPU-optimised cores**, and paste the same text into the box called "user data" or "cloud-init":
-- DigitalOcean: *CPU-Optimized* droplet, 4 vCPU
-- Vultr: *Dedicated CPU*, 4 vCPU
-- Akamai/Linode: *Dedicated CPU*, 4 cores
+Nigerian cards are often refused by foreign companies ("3D-Secure failed" is the usual message): many Naira cards have international spending switched off or capped, and the bank's confirmation code may not arrive in time. Quick things to try first: switch on **international online payments** for the card in your banking app, approve the confirmation code immediately, make sure the billing address matches the card's address, and if the card is a **dollar card** choose **USD** (not EUR) on Hetzner's sign-up page (the currency cannot be changed afterwards).
+
+The reliable fix is a **virtual dollar card**: a USD Visa/Mastercard that exists only in an app, funded in naira. It works on any provider, and many Nigerian banking and fintech apps offer one. (PayPal also needs a working international card or balance behind it.)
+
+**Recommended alternative: Akamai / Linode** (linode.com). Prices below are third-party listings from October 2026; confirm on the order page.
+
+| Provider and plan | 4 dedicated cores? | Approx. price |
+|---|---|---|
+| **Akamai/Linode "Dedicated 8 GB"** | Yes (4 CPU, 8 GB) | **$0.108 per hour** ($72 a month) |
+| DigitalOcean "CPU-Optimized" (c-4) | Yes (4 vCPU, 8 GB) | about $0.125 per hour ($84 a month) |
+| Hetzner CCX23 | Yes (4 vCPU, 16 GB) | about $0.139 per hour |
+| Vultr Optimized 4 vCPU | Yes (4 vCPU, 16 GB) | about $0.179 per hour |
+
+All bill by the hour, so the 3-hour test costs about $0.35-0.55 anywhere. Delete the server afterwards on any of them.
+
+**Steps on Linode:** Create account, then **Create Linode**: Region **Frankfurt (Germany)**, Image **Ubuntu 24.04 LTS**, tab **Dedicated CPU**, plan **Dedicated 8 GB**. Set a long random **Root Password** (nobody needs to know it; the key is used to log in). Open **Add User Data** and paste the whole contents of `deploy\cloud-init.generated.yaml`. Create, then send Claude the IP address.
+
+**Steps on DigitalOcean:** **Create Droplet**: Region **Frankfurt**, Image **Ubuntu 24.04**, **CPU-Optimized** 4 vCPU plan, Authentication **SSH key** (any), and under **Advanced Options** tick **Add Initialization scripts (free)** and paste the same text. DigitalOcean can be strict about virtual or prepaid cards.
 
 ## What Claude does once you send the address
 1. Sends the recorder to the server and builds it (`deploy\deploy.ps1 -Server <address> -Bench`).
