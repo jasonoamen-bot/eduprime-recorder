@@ -58,6 +58,9 @@ function loadConfig(): FleetConfig {
   const spare = Number(env.FLEET_SPARE_CLASSES);
   const config = { ...DEFAULT_CONFIG, spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : 1, ...overrides };
   // A pause switch: nothing new is created, but servers still get deleted (so a pause can never leave money running).
+  // FLEET_MAX_SERVERS raises/lowers the hard ceiling without a config file (the scheduler server only receives .env).
+  const ceiling = Number(env.FLEET_MAX_SERVERS);
+  if (env.FLEET_MAX_SERVERS && Number.isInteger(ceiling) && ceiling >= 1 && ceiling <= 20) config.maxServers = ceiling;
   // A new Linode account may not be allowed the big plans (its limit, lifted by a support request): FLEET_TYPES=g6-dedicated-2,g6-dedicated-4
   // keeps the planner to the plans that can really be created. Cost per class is the same, so only the server count changes.
   if (env.FLEET_TYPES) {
