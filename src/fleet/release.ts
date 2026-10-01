@@ -23,12 +23,14 @@ export function packSource(repoDir: string): Buffer {
   const dir = mkdtempSync(join(tmpdir(), "recorder-src-"));
   const file = join(dir, "source.tgz");
   try {
+    // The archive name is relative (run inside `dir`): GNU tar, which Git Bash puts first on PATH, reads "C:" in an absolute
+    // Windows path as a remote host and fails.
     execFileSync("tar", [
-      "-czf", file,
+      "-czf", "source.tgz",
       "--exclude=node_modules", "--exclude=.git", "--exclude=dist", "--exclude=.stage", "--exclude=out", "--exclude=spool",
       "--exclude=tools", "--exclude=deploy", "--exclude=.env", "--exclude=.env.*", "--exclude=*.log", "--exclude=test",
       "--exclude=fixtures/vendor", "--exclude=fleet.config.json", "-C", repoDir, ".",
-    ]);
+    ], { cwd: dir });
     return readFileSync(file);
   } finally {
     rmSync(dir, { recursive: true, force: true });
