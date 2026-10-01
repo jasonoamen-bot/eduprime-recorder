@@ -29,10 +29,15 @@ export async function tick(opts: {
   probe: Probe;
   config: FleetConfig;
   apply: boolean;
-  /** Built fresh for each new server (it carries a one-hour download link). */
-  userData: () => Promise<string> | string;
+  /** Built fresh for each new server (it carries a one-hour download link) and knows which size it is for. */
+  userData: (server: { typeId: string }) => Promise<string> | string;
   /** How many classes to expect (the LMS forecast, or the built-in timetable). Defaults to the built-in one. */
   demand?: Demand;
+  /**
+   * Called after deciding and BEFORE acting (apply only). The place to take servers that are about to be
+   * deleted out of the directory, so the LMS stops sending them work before they disappear.
+   */
+  beforeApply?: (state: { servers: ServerState[]; decision: Decision }) => Promise<void>;
   now?: Date;
 }): Promise<TickReport> {
   const now = opts.now ?? new Date();
@@ -44,9 +49,11 @@ export async function tick(opts: {
 
   const executed: Executed[] = [];
   if (opts.apply) {
+    // A directory failure must never stop servers being created or removed.
+    await opts.beforeApply?.({ servers, decision }).catch(() => undefined);
     for (const action of decision.actions) {
       try {
-        if (action.kind === "create") await opts.provider.create({ typeId: action.typeId, label: label(now), userData: await opts.userData() });
+        if (action.kind === "create") await opts.provider.create({ typeId: action.typeId, label: label(now), userData: await opts.userData({ typeId: action.typeId }) });
         else await opts.provider.remove(action.id);
         executed.push({ action, ok: true });
       } catch (error) {

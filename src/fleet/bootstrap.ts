@@ -10,6 +10,17 @@
  * create servers is NEVER included.
  */
 
+/**
+ * Set how many recordings THIS server accepts at once, replacing any value in the shared settings file.
+ * Without this every server would claim the same limit whatever its size, and a small one would be overloaded.
+ */
+export function withMaxJobs(recorderEnv: string, maxJobs: number): string {
+  if (!Number.isInteger(maxJobs) || maxJobs < 1 || maxJobs > 50) throw new Error(`bad job limit: ${maxJobs}`);
+  const kept = recorderEnv.split(/\r?\n/).filter((line) => !/^\s*MAX_CONCURRENT_JOBS\s*=/.test(line));
+  while (kept.length && kept[kept.length - 1]!.trim() === "") kept.pop();
+  return `${kept.join("\n")}\nMAX_CONCURRENT_JOBS=${maxJobs}\n`;
+}
+
 export type BootstrapInput = {
   /** The recorder's settings file: shared secret, allowed origins, Backblaze keys, video settings. */
   recorderEnv: string;

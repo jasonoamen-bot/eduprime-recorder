@@ -17,9 +17,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildUserData } from "./bootstrap.js";
+import { buildUserData, withMaxJobs } from "./bootstrap.js";
 import { ForecastDemand, fetchForecast, loadDemand, type DemandMode } from "./demand.js";
-import { httpProbe } from "./health.js";
+import { buildDirectory, publishDirectory, type ServerHealth } from "./directory.js";
+import { httpHealth, httpProbe } from "./health.js";
 import { acquireLock } from "./lock.js";
 import { LinodeProvider } from "./linode.js";
 import { bestFleet, costPerHour } from "./plan.js";
@@ -66,12 +67,15 @@ function provider() {
   return new LinodeProvider({ token, region: env.FLEET_REGION ?? "eu-central", tag: env.FLEET_TAG ?? "eduprime-recorder", authorizedKeys: key ? [key] : [] });
 }
 
-async function makeUserData(): Promise<string> {
+async function makeUserData(server: { typeId: string } = { typeId: "" }): Promise<string> {
   const envFile = resolve(repo, env.FLEET_RECORDER_ENV_FILE ?? "deploy/prod.env");
   if (!existsSync(envFile)) throw new Error(`the recorder settings file is missing: ${envFile} (copy deploy/env.server.example and fill it in)`);
   const keyFile = env.FLEET_SSH_PUBKEY_FILE;
+  // Each server accepts only as many recordings as its size is trusted with.
+  const classes = loadConfig().types.find((t) => t.id === server.typeId)?.classes;
+  const recorderEnv = readFileSync(envFile, "utf8");
   return buildUserData({
-    recorderEnv: readFileSync(envFile, "utf8"),
+    recorderEnv: classes ? withMaxJobs(recorderEnv, classes) : recorderEnv,
     sourceUrl: await sourceDownloadUrl(s3Settings()),
     sshPublicKey: keyFile && existsSync(keyFile) ? readFileSync(keyFile, "utf8").trim() : undefined,
   });
@@ -153,7 +157,16 @@ async function main(): Promise<void> {
     if (!release) { console.log("Another pass is running (lock held); skipping."); return; }
     try {
       const loaded = await loadDemand(demandOptions(config));
-      const report = await tick({ provider: p, probe: httpProbe(), config, apply, userData: makeUserData, demand: loaded.demand });
+      // Publish which servers the LMS may send work to BEFORE any server is deleted, so it stops using them first.
+      const beforeApply = async ({ servers, decision }: { servers: import("./types.js").ServerState[]; decision: import("./reconcile.js").Decision }) => {
+        const doomed = new Set(decision.actions.flatMap((a) => (a.kind === "delete" ? [a.id] : [])));
+        const health = new Map<string, ServerHealth>();
+        await Promise.all(servers.map(async (s) => { const h = s.ip ? await httpHealth(s.ip) : null; if (h) health.set(s.id, h); }));
+        const directory = buildDirectory(servers, health, doomed, new Date());
+        await publishDirectory(s3Settings(), directory);
+        console.log(`  directory published: ${directory.servers.length} server(s) open for recording`);
+      };
+      const report = await tick({ provider: p, probe: httpProbe(), config, apply, userData: makeUserData, demand: loaded.demand, beforeApply });
       console.log(`${report.at.toISOString()}  classes needed within ${config.leadMinutes} min: ${report.decision.need.create}, within ${config.keepMinutes} min: ${report.decision.need.keep}  servers: ${report.servers.length}`);
       console.log(`  timetable: ${loaded.note}`);
       for (const n of report.decision.notes) console.log(`  note: ${n}`);
