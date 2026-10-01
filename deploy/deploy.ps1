@@ -9,9 +9,11 @@ param(
   [string]$Key = "$env:USERPROFILE\.ssh\eduprime-recorder-test",
   [switch]$Bench
 )
-$ErrorActionPreference = "Stop"
+# "Continue", not "Stop": ssh/scp print harmless notices on stderr (e.g. "added to known hosts"), which
+# PowerShell 5 would otherwise turn into fatal errors. Real failures are caught by the exit-code checks below.
+$ErrorActionPreference = "Continue"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
-$ssh = @("-i", $Key, "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=30")
+$ssh = @("-i", $Key, "-o", "StrictHostKeyChecking=accept-new", "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR")
 $remote = "root@$Server"
 function Remote($cmd) { & ssh @ssh $remote $cmd; if ($LASTEXITCODE -ne 0) { throw "remote command failed: $cmd" } }
 
@@ -29,7 +31,8 @@ Push-Location $repo
 tar -czf $tar --exclude=node_modules --exclude=.git --exclude=dist --exclude=.stage --exclude=out --exclude=spool --exclude=tools --exclude=".env" --exclude="deploy/bench/loadpub-linux-amd64" --exclude="deploy/cloud-init.generated.yaml" .
 Pop-Location
 & scp @ssh $tar "${remote}:/tmp/recorder-src.tgz"
-Remote "rm -rf /opt/eduprime-recorder/src && mkdir -p /opt/eduprime-recorder/src && tar xzf /tmp/recorder-src.tgz -C /opt/eduprime-recorder/src && mkdir -p /opt/eduprime-recorder/src/spool /opt/eduprime-recorder/src/out"
+if ($LASTEXITCODE -ne 0) { throw "could not copy the code to the server" }
+Remote "rm -rf /opt/eduprime-recorder/src && mkdir -p /opt/eduprime-recorder/src && tar xzf /tmp/recorder-src.tgz -C /opt/eduprime-recorder/src && mkdir -p /opt/eduprime-recorder/src/spool /opt/eduprime-recorder/src/out && chown -R 1001:1001 /opt/eduprime-recorder/src/spool /opt/eduprime-recorder/src/out"
 
 Write-Host "3/4  Building the recorder on the server (takes a few minutes the first time)..."
 Remote "cd /opt/eduprime-recorder/src && docker build -f Dockerfile.server -t eduprime-recorder:server ."

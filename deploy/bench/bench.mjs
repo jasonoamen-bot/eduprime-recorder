@@ -108,7 +108,9 @@ async function scenario(n) {
     const now = cpuTimes();
     const dBusy = now.busy - prev.busy, dIdle = now.idle - prev.idle, dSteal = now.steal - prev.steal, total = dBusy + dIdle + dSteal || 1;
     const stat = docker("stats", "--no-stream", "--format", "{{.CPUPerc}}|{{.MemUsage}}", "recorder").split("|");
-    const mem = parseFloat(stat[1]) * (/GiB/.test(stat[1]) ? 1024 : 1);
+    // "473.9MiB / 7.755GiB": read the USED part only (before the slash), not the limit's unit.
+    const used = stat[1].split("/")[0];
+    const mem = parseFloat(used) * (/GiB/.test(used) ? 1024 : /KiB/.test(used) ? 1 / 1024 : 1);
     samples.push({ busyPct: (dBusy / total) * 100, stealPct: (dSteal / total) * 100, recorderCores: parseFloat(stat[0]) / 100, memMiB: mem });
     prev = now;
     process.stdout.write(`  ${Math.round((Date.now() - (end - seconds * 1000)) / 1000)}s  machine ${samples.at(-1).busyPct.toFixed(0)}% busy, recorder ${samples.at(-1).recorderCores.toFixed(2)} cores\n`);
@@ -133,11 +135,15 @@ async function scenario(n) {
       // ffmpeg prints its analysis on stderr, which spawnSync hands back (execFileSync would discard it on success).
       const run = (...vf) => spawnSync("docker", ["exec", "recorder", "ffmpeg", "-i", file, ...vf, "-f", "null", "-"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }).stderr || "";
       const freezeText = run("-vf", "freezedetect=n=-55dB:d=2", "-an");
-      const frozen = [...freezeText.matchAll(/freeze_duration:\s*([\d.]+)/g)].reduce((s, m) => s + Number(m[1]), 0);
+      // The fake tutor needs ~1 minute before its video flows and its video file ends ~10 s before we stop
+      // recording; neither is the recorder's doing. Judge the STEADY STATE: from 60 s to 15 s before the end.
+      const pairs = [...freezeText.matchAll(/freeze_start:\s*([\d.]+)[\s\S]*?freeze_duration:\s*([\d.]+)/g)].map((m) => [Number(m[1]), Number(m[2])]);
+      const steady = pairs.filter(([start]) => start >= 60 && start <= dur - 15);
+      const frozen = steady.reduce((s, [, d]) => s + d, 0);
       const vol = Number((run("-af", "volumedetect", "-vn").match(/mean_volume:\s*(-?[\d.]+)/) || [])[1] ?? -Infinity);
       row = {
         room: c.room, ok: true, minutes: +(dur / 60).toFixed(1), mbPerMin: +((Number(probe.size) / 1e6) / (dur / 60)).toFixed(2),
-        freezes: (freezeText.match(/freeze_start/g) || []).length, frozenSeconds: +frozen.toFixed(1), frozenPct: +((frozen / dur) * 100).toFixed(1), soundDb: vol,
+        freezes: steady.length, frozenSeconds: +frozen.toFixed(1), frozenPct: +((frozen / Math.max(1, dur - 75)) * 100).toFixed(1), soundDb: vol,
       };
     } catch (e) {
       row.error = String(e.message).slice(0, 160);
