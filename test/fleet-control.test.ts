@@ -189,3 +189,13 @@ describe("creating a server when a region will not take it", () => {
     await expect(new LinodeProvider({ token: TOKEN, fetch: fakeFetch, fallbackRegions: ["eu-west"] }).create(spec)).rejects.toThrow(/no region would take the server.*eu-central.*eu-west/);
   });
 });
+
+describe("the control file written by the LMS", () => {
+  it("reads the example the LMS repository asserts (the two repositories agree on the shape)", () => {
+    const shared = '{"version":1,"updatedAt":"2026-10-05T08:45:00.000Z","updatedBy":"Mary","paused":true,"pauseNote":"checking the bill","skipDates":["2026-12-24","2026-12-25"],"boost":{"classes":2,"until":"2026-10-05T11:45:00.000Z"},"spareClasses":null,"maxServers":4}';
+    expect(parseControl(JSON.parse(shared), at("2026-10-05T08:45:00Z"))).toEqual({
+      version: 1, updatedAt: "2026-10-05T08:45:00.000Z", updatedBy: "Mary", paused: true, pauseNote: "checking the bill",
+      skipDates: ["2026-12-24", "2026-12-25"], boost: { classes: 2, until: "2026-10-05T11:45:00.000Z" }, spareClasses: null, maxServers: 4,
+    });
+  });
+});
