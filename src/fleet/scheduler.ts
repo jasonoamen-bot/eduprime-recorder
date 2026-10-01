@@ -11,6 +11,8 @@
  */
 
 export const SCHEDULER_TAG = "eduprime-scheduler";
+/** The second scheduler, in another region: it only acts when the first has gone quiet (see beat.ts). */
+export const SCHEDULER_STANDBY_TAG = "eduprime-scheduler-standby";
 /** Linode's smallest plan (about $5 a month). The job is a few HTTP calls every five minutes. */
 export const SCHEDULER_TYPE = "g6-nanode-1";
 
@@ -23,6 +25,8 @@ export type SchedulerInput = {
   recorderEnv: string;
   /** Optional: keep the fleet from creating anything (it still deletes). For pausing without destroying the scheduler. */
   pauseCreates?: boolean;
+  /** "standby" = act only when the primary scheduler has been silent for a while. */
+  role?: "primary" | "standby";
 };
 
 const b64 = (text: string) => Buffer.from(text, "utf8").toString("base64");
@@ -31,7 +35,7 @@ export function buildSchedulerUserData(input: SchedulerInput): string {
   if (!/^https:\/\//.test(input.sourceUrl)) throw new Error("the source link must be https");
   if (!/^LINODE_TOKEN=\S{20,}/m.test(input.dotEnv)) throw new Error("the scheduler needs LINODE_TOKEN in .env");
   if (!/^RECORDER_SHARED_SECRET=\S{32,}/m.test(input.recorderEnv)) throw new Error("the recorder settings need a RECORDER_SHARED_SECRET");
-  const dotEnv = input.dotEnv.replace(/^FLEET_RECORDER_ENV_FILE=.*$/m, "").trimEnd() + `\nFLEET_RECORDER_ENV_FILE=deploy/prod.env\n` + (input.pauseCreates ? "FLEET_PAUSE_CREATES=1\n" : "");
+  const dotEnv = input.dotEnv.replace(/^FLEET_RECORDER_ENV_FILE=.*$/m, "").trimEnd() + `\nFLEET_RECORDER_ENV_FILE=deploy/prod.env\n` + (input.pauseCreates ? "FLEET_PAUSE_CREATES=1\n" : "") + (input.role === "standby" ? "FLEET_ROLE=standby\n" : "");
 
   const text = [
     "#cloud-config",

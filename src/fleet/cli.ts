@@ -8,9 +8,9 @@
  *   npm run fleet -- tick [--apply]          one pass: what should be created/deleted (dry run unless --apply)
  *   npm run fleet -- create --type ID [--apply]   make one server by hand (for testing)
  *   npm run fleet -- teardown [--apply]      delete EVERY server this fleet made (emergency / end of a test)
- *   npm run fleet -- heartbeat               when the scheduler last ran, and what it saw
+ *   npm run fleet -- heartbeat [--log]       when each scheduler last ran, and (with --log) what it did
  *   npm run fleet -- release                 publish the recorder source that new servers build from
- *   npm run fleet -- scheduler [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
+ *   npm run fleet -- scheduler [--role standby --region eu-west] [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
  *
  * Everything that spends or removes money is a dry run unless `--apply` is given.
  * Settings live in the recorder's .env (LINODE_TOKEN, S3_*), `fleet.config.json` (optional overrides) and
@@ -21,10 +21,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildUserData, withMaxJobs } from "./bootstrap.js";
 import { ForecastDemand, fetchForecast, loadDemand, type DemandMode } from "./demand.js";
-import { buildDirectory, publishDirectory, publishHeartbeat, readHeartbeat, type ServerHealth } from "./directory.js";
+import { hostname } from "node:os";
+import { applyControl, readControl } from "./control.js";
+import { buildDirectory, publishDirectory, type ServerHealth } from "./directory.js";
+import { nextBeat, readBeat, shouldStandBy, writeBeat, type Role } from "./beat.js";
 import { httpHealth, httpProbe } from "./health.js";
 import { acquireLock } from "./lock.js";
-import { SCHEDULER_TAG, SCHEDULER_TYPE, buildSchedulerUserData } from "./scheduler.js";
+import { SCHEDULER_STANDBY_TAG, SCHEDULER_TAG, SCHEDULER_TYPE, buildSchedulerUserData } from "./scheduler.js";
 import { LinodeProvider } from "./linode.js";
 import { bestFleet, costPerHour } from "./plan.js";
 import { publishSource, sourceDownloadUrl, type S3Settings } from "./release.js";
@@ -83,7 +86,8 @@ function provider() {
   const token = env.LINODE_TOKEN;
   if (!token) throw new Error("LINODE_TOKEN is missing from .env");
   const key = env.FLEET_SSH_PUBKEY_FILE && existsSync(env.FLEET_SSH_PUBKEY_FILE) ? readFileSync(env.FLEET_SSH_PUBKEY_FILE, "utf8").trim() : undefined;
-  return new LinodeProvider({ token, region: env.FLEET_REGION ?? "eu-central", tag: env.FLEET_TAG ?? "eduprime-recorder", authorizedKeys: key ? [key] : [] });
+  const fallbackRegions = (env.FLEET_REGION_FALLBACKS ?? "eu-west").split(",").map((r) => r.trim()).filter(Boolean);
+  return new LinodeProvider({ token, region: env.FLEET_REGION ?? "eu-central", fallbackRegions, tag: env.FLEET_TAG ?? "eduprime-recorder", authorizedKeys: key ? [key] : [] });
 }
 
 async function makeUserData(server: { typeId: string } = { typeId: "" }): Promise<string> {
@@ -175,18 +179,43 @@ async function main(): Promise<void> {
     const release = acquireLock(join(repo, ".fleet.lock"));
     if (!release) { console.log("Another pass is running (lock held); skipping."); return; }
     try {
-      const loaded = await loadDemand(demandOptions(config));
+      const s3 = s3Settings();
+      const now = new Date();
+      const role: Role = env.FLEET_ROLE === "standby" ? "standby" : "primary";
+      const holder = hostname();
+      const events: string[] = [];
+
+      // A standby leaves the work to the primary for as long as the primary keeps reporting in.
+      if (role === "standby") {
+        const verdict = shouldStandBy(await readBeat(s3, "primary"), now);
+        console.log(`${now.toISOString()}  standby: ${verdict.why}`);
+        const mine = await readBeat(s3, "standby");
+        if (verdict.standBy) {
+          if (apply) await writeBeat(s3, nextBeat(mine, now, { role, holder, acting: false, servers: 0, needSoon: 0, needLater: 0, actions: 0, failed: 0, timetable: verdict.why, paused: false, boosted: false, notes: [], events: [] })).catch(() => undefined);
+          return;
+        }
+        if (!mine?.acting) events.push(`STANDBY took over: ${verdict.why}`);
+      }
+
+      // What the office has asked for (pause, skip dates, boost). A missing or broken file means "no instructions".
+      const { control, problem } = await readControl(s3, now);
+      if (problem) { console.log(`  ${problem}`); events.push(problem); }
+      const applied = applyControl(config, control, now);
+      for (const n of applied.notes) console.log(`  control: ${n}`);
+
+      const loaded = await loadDemand({ ...demandOptions(applied.config), skipDates: applied.skipDates });
+      const demand = applied.adjustDemand(loaded.demand);
       // Publish which servers the LMS may send work to BEFORE any server is deleted, so it stops using them first.
       const beforeApply = async ({ servers, decision }: { servers: import("./types.js").ServerState[]; decision: import("./reconcile.js").Decision }) => {
         const doomed = new Set(decision.actions.flatMap((a) => (a.kind === "delete" ? [a.id] : [])));
         const health = new Map<string, ServerHealth>();
         await Promise.all(servers.map(async (s) => { const h = s.ip ? await httpHealth(s.ip) : null; if (h) health.set(s.id, h); }));
         const directory = buildDirectory(servers, health, doomed, new Date());
-        await publishDirectory(s3Settings(), directory);
+        await publishDirectory(s3, directory);
         console.log(`  directory published: ${directory.servers.length} server(s) open for recording`);
       };
-      const report = await tick({ provider: p, probe: httpProbe(), config, apply, userData: makeUserData, demand: loaded.demand, beforeApply });
-      console.log(`${report.at.toISOString()}  classes needed within ${config.leadMinutes} min: ${report.decision.need.create}, within ${config.keepMinutes} min: ${report.decision.need.keep}  servers: ${report.servers.length}`);
+      const report = await tick({ provider: p, probe: httpProbe(), config: applied.config, apply, userData: makeUserData, demand, beforeApply });
+      console.log(`${report.at.toISOString()}  classes needed within ${applied.config.leadMinutes} min: ${report.decision.need.create}, within ${applied.config.keepMinutes} min: ${report.decision.need.keep}  servers: ${report.servers.length}`);
       console.log(`  timetable: ${loaded.note}`);
       for (const n of report.decision.notes) console.log(`  note: ${n}`);
       if (report.decision.actions.length === 0) console.log("  nothing to do");
@@ -194,14 +223,20 @@ async function main(): Promise<void> {
         const done = report.executed[i];
         const what = a.kind === "create" ? `CREATE ${a.typeId}` : `DELETE ${a.label}`;
         console.log(`  ${apply ? (done?.ok ? "done:  " : "FAILED:") : "would: "} ${what}  (${a.reason})${done?.error ? "  ERROR: " + done.error : ""}`);
+        if (apply) events.push(done?.ok ? `${a.kind === "create" ? "started" : "removed"} ${a.kind === "create" ? a.typeId : a.label}: ${a.reason}` : `FAILED to ${a.kind} ${a.kind === "create" ? a.typeId : a.label}: ${done?.error ?? "unknown error"}`);
       });
       if (!apply && report.decision.actions.length) console.log("  (dry run: nothing changed. Add --apply to act.)");
       if (report.executed.some((e) => !e.ok)) process.exitCode = 1;
+
       if (apply) {
-        await publishHeartbeat(s3Settings(), {
-          at: report.at.toISOString(), servers: report.servers.length, needSoon: report.decision.need.create, needLater: report.decision.need.keep,
+        const prev = await readBeat(s3, role);
+        // Tell the log when the office's instructions change, not on every pass.
+        if (JSON.stringify(prev?.notes ?? []) !== JSON.stringify(applied.notes)) events.push(applied.notes.length ? `instructions now in force: ${applied.notes.join("; ")}` : "no special instructions in force");
+        await writeBeat(s3, nextBeat(prev, now, {
+          role, holder, acting: true, servers: report.servers.length, needSoon: report.decision.need.create, needLater: report.decision.need.keep,
           actions: report.decision.actions.length, failed: report.executed.filter((e) => !e.ok).length, timetable: loaded.note,
-        }).catch((error) => console.log(`  (heartbeat not written: ${error instanceof Error ? error.message : error})`));
+          paused: control.paused, boosted: applied.notes.some((n) => n.startsWith("BOOST")), notes: applied.notes, events,
+        })).catch((error: unknown) => console.log(`  (heartbeat not written: ${error instanceof Error ? error.message : String(error)})`));
       }
     } finally {
       release();
@@ -210,21 +245,37 @@ async function main(): Promise<void> {
   }
 
   if (command === "heartbeat") {
-    const beat = await readHeartbeat(s3Settings());
-    if (!beat) { console.log("No heartbeat yet: the scheduler has not completed a pass."); process.exitCode = 1; return; }
-    const age = Math.round((Date.now() - new Date(beat.at).getTime()) / 1000);
-    console.log(`Scheduler last ran ${age}s ago (${beat.at}): ${beat.servers} server(s), ${beat.needSoon} class(es) needed soon, ${beat.actions} action(s), ${beat.failed} failed. Timetable: ${beat.timetable}`);
-    if (age > 600) { console.log("WARNING: more than 10 minutes old. The scheduler may be stuck."); process.exitCode = 1; }
+    const s3 = s3Settings();
+    let worst = 0;
+    for (const role of ["primary", "standby"] as const) {
+      const beat = await readBeat(s3, role);
+      if (!beat) { console.log(`${role}: no heartbeat${role === "primary" ? " yet: the scheduler has not completed a pass" : ""}.`); if (role === "primary") worst = 1; continue; }
+      const age = Math.round((Date.now() - new Date(beat.at).getTime()) / 1000);
+      console.log(`${role}: ran ${age}s ago (${beat.at}) on ${beat.holder}${beat.acting ? "" : " [standing by]"}: ${beat.servers} server(s), ${beat.needSoon} class(es) needed soon, ${beat.actions} action(s), ${beat.failed} failed.${beat.paused ? " PAUSED." : ""}`);
+      if (role === "primary" && age > 600) { console.log("WARNING: the primary is more than 10 minutes silent. The standby will take over after 12."); worst = 1; }
+      if (flag("log")) for (const l of beat.recent.slice(-15)) console.log(`    ${l.at.slice(5, 16).replace("T", " ")}  ${l.text}`);
+    }
+    process.exitCode = worst;
     return;
   }
 
   if (command === "scheduler") {
     // The always-on machine that runs `tick --apply` every 5 minutes. Tagged differently so the fleet never touches it.
     const token = env.LINODE_TOKEN!;
-    const sched = new LinodeProvider({ token, region: env.FLEET_REGION ?? "eu-central", tag: SCHEDULER_TAG });
+    // --role standby builds the second scheduler, in ANOTHER region (--region, default eu-west), under its own tag.
+    const standby = option("role") === "standby";
+    const tag = standby ? SCHEDULER_STANDBY_TAG : SCHEDULER_TAG;
+    const sched = new LinodeProvider({ token, region: standby ? option("region") ?? "eu-west" : env.FLEET_REGION ?? "eu-central", tag });
     const existing = await sched.list();
     const action = option("do") ?? "create";
-    if (action === "status") { console.log(existing.length ? existing.map((s) => `${s.label} id=${s.id} ${s.status} ip=${s.ip}`).join("\n") : "No scheduler exists."); return; }
+    if (action === "status") {
+      const both = [
+        ...(await new LinodeProvider({ token, tag: SCHEDULER_TAG }).list()).map((s) => ({ ...s, role: "primary" })),
+        ...(await new LinodeProvider({ token, tag: SCHEDULER_STANDBY_TAG }).list()).map((s) => ({ ...s, role: "standby" })),
+      ];
+      console.log(both.length ? both.map((s) => `${s.role}: ${s.label} id=${s.id} ${s.status} ip=${s.ip}`).join("\n") : "No scheduler exists.");
+      return;
+    }
     if (action === "delete") {
       for (const s of existing) { if (apply) { await sched.remove(s.id); console.log(`deleted ${s.label}`); } else console.log(`would delete ${s.label} (add --apply)`); }
       if (existing.length === 0) console.log("No scheduler exists.");
@@ -239,8 +290,9 @@ async function main(): Promise<void> {
       dotEnv: readFileSync(join(repo, ".env"), "utf8"),
       recorderEnv: readFileSync(resolve(repo, env.FLEET_RECORDER_ENV_FILE ?? "deploy/prod.env"), "utf8"),
       pauseCreates: flag("paused"),
+      role: standby ? "standby" : "primary",
     });
-    const server = await sched.create({ typeId: SCHEDULER_TYPE, label: `fleet-scheduler-${Date.now().toString(36)}`, userData });
+    const server = await sched.create({ typeId: SCHEDULER_TYPE, label: `fleet-${standby ? "standby" : "scheduler"}-${Date.now().toString(36)}`, userData });
     console.log(`Created ${server.label} (id ${server.id}). It is ready in about 5 minutes; check with: npm run fleet -- scheduler --do status`);
     return;
   }

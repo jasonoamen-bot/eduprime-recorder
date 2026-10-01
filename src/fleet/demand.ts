@@ -1,5 +1,5 @@
 import { SIGNATURE_HEADER, TIMESTAMP_HEADER, sign } from "../auth.js";
-import { classesAt, peakClasses } from "./slots.js";
+import { classesAt, peakClasses, schoolClock } from "./slots.js";
 import type { FleetConfig } from "./types.js";
 
 /**
@@ -50,8 +50,12 @@ export class ForecastDemand implements Demand {
   private readonly asOf: number;
   private readonly liveNow: number;
 
-  constructor(forecast: Forecast) {
-    this.buckets = forecast.buckets.map((b) => ({ start: Date.parse(b.start), end: Date.parse(b.end), classes: b.classes }));
+  /** `skipDates` (school dates) are ignored: no timetable class counts on them. A class live right now still does. */
+  constructor(forecast: Forecast, skipDates: readonly string[] = []) {
+    const skip = new Set(skipDates);
+    this.buckets = forecast.buckets
+      .map((b) => ({ start: Date.parse(b.start), end: Date.parse(b.end), classes: b.classes }))
+      .filter((b) => !skip.has(schoolClock(new Date(b.start)).dateKey));
     this.asOf = Date.parse(forecast.generatedAt);
     this.liveNow = forecast.liveNow;
   }
@@ -127,6 +131,8 @@ export async function loadDemand(opts: {
   secret?: string;
   now?: Date;
   fetch?: typeof fetch;
+  /** School dates the office has marked "no classes" (control file). */
+  skipDates?: readonly string[];
 }): Promise<LoadedDemand> {
   const fallback = staticDemand(opts.config);
   const mode = opts.mode ?? "lms";
@@ -135,7 +141,7 @@ export async function loadDemand(opts: {
   }
   try {
     const forecast = await fetchForecast({ url: opts.forecastUrl, secret: opts.secret, now: opts.now, fetch: opts.fetch });
-    const lms = new ForecastDemand(forecast);
+    const lms = new ForecastDemand(forecast, opts.skipDates ?? []);
     const detail = `${forecast.buckets.length} class period(s) in the next ${Math.round((Date.parse(forecast.to) - Date.parse(forecast.from)) / 3_600_000)} h, ${forecast.liveNow} live now, ${forecast.cohorts} cohorts`;
     if (mode === "max") return { demand: maxDemand(lms, fallback), source: "max", note: `LMS timetable (${detail}), never below the built-in one` };
     return { demand: lms, source: "lms", note: `following the LMS timetable (${detail})` };

@@ -63,22 +63,3 @@ export async function readDirectory(s3: S3Settings): Promise<Directory | null> {
     return null;
   }
 }
-
-/** Written by the scheduler after every pass, so "is it alive and what did it last do?" can be answered from anywhere. */
-export const HEARTBEAT_KEY = RELEASE_KEY.replace("source-latest.tgz", "scheduler-heartbeat.json");
-export type Heartbeat = { at: string; servers: number; needSoon: number; needLater: number; actions: number; failed: number; timetable: string };
-
-export async function publishHeartbeat(s3: S3Settings, beat: Heartbeat): Promise<void> {
-  const client = createS3Client({ S3_REGION: s3.region, S3_ENDPOINT: s3.endpoint, S3_ACCESS_KEY: s3.accessKey, S3_SECRET: s3.secret });
-  await client.send(new PutObjectCommand({ Bucket: s3.bucket, Key: HEARTBEAT_KEY, Body: JSON.stringify(beat), ContentType: "application/json", CacheControl: "no-store" }));
-}
-
-export async function readHeartbeat(s3: S3Settings): Promise<Heartbeat | null> {
-  const client = createS3Client({ S3_REGION: s3.region, S3_ENDPOINT: s3.endpoint, S3_ACCESS_KEY: s3.accessKey, S3_SECRET: s3.secret });
-  try {
-    const out = await client.send(new GetObjectCommand({ Bucket: s3.bucket, Key: HEARTBEAT_KEY }));
-    return JSON.parse(await out.Body!.transformToString()) as Heartbeat;
-  } catch {
-    return null;
-  }
-}

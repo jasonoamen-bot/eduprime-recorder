@@ -6,6 +6,8 @@ export type LinodeOptions = {
   token: string;
   /** "eu-central" = Frankfurt. Must support the Metadata service (cloud-init). */
   region?: string;
+  /** Tried in order when a server cannot be created in `region` (datacentre out of capacity, or down). */
+  fallbackRegions?: string[];
   image?: string;
   /** Every server we create carries this tag, and we ONLY ever list or delete servers that have it. */
   tag?: string;
@@ -32,7 +34,7 @@ const mapStatus = (status: string): ServerStatus =>
  *    someone else's machine.
  */
 export class LinodeProvider implements ComputeProvider {
-  private readonly region: string;
+  private readonly regions: string[];
   private readonly image: string;
   private readonly tag: string;
   private readonly base: string;
@@ -40,7 +42,7 @@ export class LinodeProvider implements ComputeProvider {
 
   constructor(private readonly options: LinodeOptions) {
     if (!options.token || options.token.length < 20) throw new Error("a Linode API token is required");
-    this.region = options.region ?? "eu-central";
+    this.regions = [...new Set([options.region ?? "eu-central", ...(options.fallbackRegions ?? [])])];
     this.image = options.image ?? "linode/ubuntu24.04";
     this.tag = options.tag ?? "eduprime-recorder";
     this.base = (options.baseUrl ?? "https://api.linode.com/v4").replace(/\/+$/, "");
@@ -73,19 +75,33 @@ export class LinodeProvider implements ComputeProvider {
     return page.data.filter((i) => i.tags?.includes(this.tag)).map((i) => this.toServer(i));
   }
 
+  /**
+   * Create a server in the first region that will take it. A rejected token (401/403) is not a region problem,
+   * so it stops straight away instead of trying every region with a bad key.
+   */
   async create(spec: CreateSpec): Promise<Server> {
-    const instance = await this.call<LinodeInstance>("POST", "/linode/instances", {
-      label: spec.label,
-      region: this.region,
-      type: spec.typeId,
-      image: this.image,
-      root_pass: randomBytes(24).toString("base64url"), // required by the API; never used (key login only)
-      authorized_keys: this.options.authorizedKeys ?? [],
-      tags: [this.tag],
-      booted: true,
-      metadata: { user_data: Buffer.from(spec.userData, "utf8").toString("base64") },
-    });
-    return this.toServer(instance);
+    const failures: string[] = [];
+    for (const region of this.regions) {
+      try {
+        const instance = await this.call<LinodeInstance>("POST", "/linode/instances", {
+          label: spec.label,
+          region,
+          type: spec.typeId,
+          image: this.image,
+          root_pass: randomBytes(24).toString("base64url"), // required by the API; never used (key login only)
+          authorized_keys: this.options.authorizedKeys ?? [],
+          tags: [this.tag],
+          booted: true,
+          metadata: { user_data: Buffer.from(spec.userData, "utf8").toString("base64") },
+        });
+        return this.toServer(instance);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failures.push(`${region}: ${message}`);
+        if (/HTTP (401|403)\b/.test(message)) break;
+      }
+    }
+    throw new Error(failures.length > 1 ? `no region would take the server (${failures.join(" | ")})` : failures[0]!);
   }
 
   async remove(id: string): Promise<void> {
