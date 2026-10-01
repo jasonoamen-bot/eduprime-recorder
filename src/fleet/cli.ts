@@ -8,6 +8,7 @@
  *   npm run fleet -- tick [--apply]          one pass: what should be created/deleted (dry run unless --apply)
  *   npm run fleet -- create --type ID [--apply]   make one server by hand (for testing)
  *   npm run fleet -- teardown [--apply]      delete EVERY server this fleet made (emergency / end of a test)
+ *   npm run fleet -- heartbeat               when the scheduler last ran, and what it saw
  *   npm run fleet -- release                 publish the recorder source that new servers build from
  *   npm run fleet -- scheduler [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
  *
@@ -20,7 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildUserData, withMaxJobs } from "./bootstrap.js";
 import { ForecastDemand, fetchForecast, loadDemand, type DemandMode } from "./demand.js";
-import { buildDirectory, publishDirectory, type ServerHealth } from "./directory.js";
+import { buildDirectory, publishDirectory, publishHeartbeat, readHeartbeat, type ServerHealth } from "./directory.js";
 import { httpHealth, httpProbe } from "./health.js";
 import { acquireLock } from "./lock.js";
 import { SCHEDULER_TAG, SCHEDULER_TYPE, buildSchedulerUserData } from "./scheduler.js";
@@ -196,9 +197,24 @@ async function main(): Promise<void> {
       });
       if (!apply && report.decision.actions.length) console.log("  (dry run: nothing changed. Add --apply to act.)");
       if (report.executed.some((e) => !e.ok)) process.exitCode = 1;
+      if (apply) {
+        await publishHeartbeat(s3Settings(), {
+          at: report.at.toISOString(), servers: report.servers.length, needSoon: report.decision.need.create, needLater: report.decision.need.keep,
+          actions: report.decision.actions.length, failed: report.executed.filter((e) => !e.ok).length, timetable: loaded.note,
+        }).catch((error) => console.log(`  (heartbeat not written: ${error instanceof Error ? error.message : error})`));
+      }
     } finally {
       release();
     }
+    return;
+  }
+
+  if (command === "heartbeat") {
+    const beat = await readHeartbeat(s3Settings());
+    if (!beat) { console.log("No heartbeat yet: the scheduler has not completed a pass."); process.exitCode = 1; return; }
+    const age = Math.round((Date.now() - new Date(beat.at).getTime()) / 1000);
+    console.log(`Scheduler last ran ${age}s ago (${beat.at}): ${beat.servers} server(s), ${beat.needSoon} class(es) needed soon, ${beat.actions} action(s), ${beat.failed} failed. Timetable: ${beat.timetable}`);
+    if (age > 600) { console.log("WARNING: more than 10 minutes old. The scheduler may be stuck."); process.exitCode = 1; }
     return;
   }
 
