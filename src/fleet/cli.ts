@@ -26,6 +26,7 @@ import { hostname } from "node:os";
 import { NO_CONTROL, applyControl, readControl, writeControl } from "./control.js";
 import { buildDirectory, publishDirectory, type ServerHealth } from "./directory.js";
 import { nextBeat, readBeat, shouldStandBy, writeBeat, type Role } from "./beat.js";
+import { addSpend, readSpend, writeSpend } from "./spend.js";
 import { httpHealth, httpProbe } from "./health.js";
 import { acquireLock } from "./lock.js";
 import { SCHEDULER_STANDBY_TAG, SCHEDULER_TAG, SCHEDULER_TYPE, buildSchedulerUserData } from "./scheduler.js";
@@ -230,6 +231,10 @@ async function main(): Promise<void> {
       if (report.executed.some((e) => !e.ok)) process.exitCode = 1;
 
       if (apply) {
+        // Running cost estimate (servers seen x time since the last pass), for the admin page.
+        const price = new Map(DEFAULT_CONFIG.types.map((t) => [t.id, t.usdPerHour]));
+        const perHour = report.servers.reduce((sum, s) => sum + (price.get(s.typeId) ?? 0), 0);
+        await writeSpend(s3, addSpend(await readSpend(s3), now, report.servers.length, perHour)).catch((error: unknown) => console.log(`  (spend not written: ${error instanceof Error ? error.message : String(error)})`));
         const prev = await readBeat(s3, role);
         // Tell the log when the office's instructions change, not on every pass.
         if (JSON.stringify(prev?.notes ?? []) !== JSON.stringify(applied.notes)) events.push(applied.notes.length ? `instructions now in force: ${applied.notes.join("; ")}` : "no special instructions in force");
