@@ -8,6 +8,7 @@
  *   npm run fleet -- tick [--apply]          one pass: what should be created/deleted (dry run unless --apply)
  *   npm run fleet -- create --type ID [--apply]   make one server by hand (for testing)
  *   npm run fleet -- teardown [--apply]      delete EVERY server this fleet made (emergency / end of a test)
+ *   npm run fleet -- control [--pause "why"|--resume] [--skip DATE|--unskip DATE] [--boost N --hours H|--no-boost]   steer the fleet like the admin page does (no flags: show)
  *   npm run fleet -- heartbeat [--log]       when each scheduler last ran, and (with --log) what it did
  *   npm run fleet -- release                 publish the recorder source that new servers build from
  *   npm run fleet -- scheduler [--role standby --region nl-ams] [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
@@ -22,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { buildUserData, withMaxJobs } from "./bootstrap.js";
 import { ForecastDemand, fetchForecast, loadDemand, type DemandMode } from "./demand.js";
 import { hostname } from "node:os";
-import { applyControl, readControl } from "./control.js";
+import { NO_CONTROL, applyControl, readControl, writeControl } from "./control.js";
 import { buildDirectory, publishDirectory, type ServerHealth } from "./directory.js";
 import { nextBeat, readBeat, shouldStandBy, writeBeat, type Role } from "./beat.js";
 import { httpHealth, httpProbe } from "./health.js";
@@ -241,6 +242,30 @@ async function main(): Promise<void> {
     } finally {
       release();
     }
+    return;
+  }
+
+  if (command === "control") {
+    const s3 = s3Settings();
+    const now = new Date();
+    const { control: current, problem } = await readControl(s3, now);
+    if (problem) console.log(problem);
+    const next = { ...current, skipDates: [...current.skipDates], updatedAt: now.toISOString(), updatedBy: "command line" };
+    let changed = false;
+    if (flag("pause")) { next.paused = true; next.pauseNote = option("pause") && !option("pause")!.startsWith("--") ? option("pause")!.slice(0, 200) : ""; changed = true; }
+    if (flag("resume")) { next.paused = false; next.pauseNote = ""; changed = true; }
+    if (option("skip")) { if (!/^\d{4}-\d{2}-\d{2}$/.test(option("skip")!)) throw new Error("--skip needs a date like 2026-12-25"); next.skipDates = [...new Set([...next.skipDates, option("skip")!])].sort(); changed = true; }
+    if (option("unskip")) { next.skipDates = next.skipDates.filter((d) => d !== option("unskip")); changed = true; }
+    if (option("boost")) {
+      const classes = Number(option("boost")); const hours = Number(option("hours") ?? 2);
+      if (!Number.isInteger(classes) || classes < 1 || classes > 12 || !(hours > 0 && hours <= 12)) throw new Error("--boost needs 1-12 classes and --hours up to 12");
+      next.boost = { classes, until: new Date(now.getTime() + hours * 3_600_000).toISOString() };
+      changed = true;
+    }
+    if (flag("no-boost")) { next.boost = null; changed = true; }
+    if (changed) { await writeControl(s3, next); console.log("Saved. The scheduler picks it up within 5 minutes."); }
+    const shown = changed ? next : current === NO_CONTROL ? NO_CONTROL : current;
+    console.log(`paused: ${shown.paused}${shown.pauseNote ? ` (${shown.pauseNote})` : ""}  days off: ${shown.skipDates.join(", ") || "none"}  boost: ${shown.boost ? `${shown.boost.classes} class(es) until ${shown.boost.until}` : "none"}  by: ${shown.updatedBy || "-"}`);
     return;
   }
 
