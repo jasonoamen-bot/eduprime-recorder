@@ -1,5 +1,5 @@
+import { staticDemand, type Demand } from "./demand.js";
 import { reconcile } from "./reconcile.js";
-import { classesAt } from "./slots.js";
 import type { FleetConfig, ServerState } from "./types.js";
 
 export type SimulationResult = {
@@ -22,11 +22,11 @@ export type SimulationResult = {
  * month would cost and to check the rules behave (servers appear before classes, vanish after, never pile up).
  * Servers take `bootMinutes` to become ready; a server is "busy" while classes occupy its capacity.
  */
-export function simulate(opts: { config: FleetConfig; from: Date; days: number; stepMinutes?: number; bootMinutes?: number }): SimulationResult {
+export function simulate(opts: { config: FleetConfig; from: Date; days: number; stepMinutes?: number; bootMinutes?: number; demand?: Demand }): SimulationResult {
   const { config, from, days } = opts;
   const step = (opts.stepMinutes ?? 5) * 60_000;
   const boot = (opts.bootMinutes ?? 6) * 60_000;
-  const skip = new Set(config.skipDates);
+  const demand = opts.demand ?? staticDemand(config);
   const typeById = new Map(config.types.map((t) => [t.id, t]));
   const end = from.getTime() + days * 24 * 3_600_000;
 
@@ -50,7 +50,7 @@ export function simulate(opts: { config: FleetConfig; from: Date; days: number; 
     const now = new Date(t);
     const running = servers.filter((s) => t - s.createdAt.getTime() >= boot).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
     // Classes fill servers in order: a server is busy while it holds any class.
-    let toPlace = classesAt(now, config.slots, skip);
+    let toPlace = demand.at(now);
     const busy = new Map<string, number>();
     for (const s of running) {
       const cap = typeById.get(s.typeId)?.classes ?? 0;
@@ -65,7 +65,7 @@ export function simulate(opts: { config: FleetConfig; from: Date; days: number; 
       status: t - s.createdAt.getTime() >= boot ? "running" : "provisioning",
       activeJobs: t - s.createdAt.getTime() >= boot ? busy.get(s.id) ?? 0 : null,
     }));
-    const decision = reconcile({ now, servers: state, config });
+    const decision = reconcile({ now, servers: state, config, demand });
     for (const action of decision.actions) {
       if (action.kind === "create") { servers.push({ id: `sim-${next++}`, typeId: action.typeId, createdAt: now }); creates += 1; bump(t, 0, 1); }
       else { const s = servers.find((x) => x.id === action.id); if (s) { bill(s, t); deletes += 1; } servers = servers.filter((x) => x.id !== action.id); }

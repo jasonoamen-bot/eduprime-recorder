@@ -1,5 +1,5 @@
 import { bestFleet, capacityOf } from "./plan.js";
-import { peakClasses } from "./slots.js";
+import { staticDemand, type Demand } from "./demand.js";
 import type { Action, FleetConfig, ServerState } from "./types.js";
 
 export type Decision = {
@@ -23,15 +23,15 @@ const MIN = 60_000;
  *  5. Never exceed `maxServers`, and never create more than `maxCreatesPerTick` in one pass: a bug here should cost
  *     a few dollars, not a bill.
  */
-export function reconcile(input: { now: Date; servers: ServerState[]; config: FleetConfig }): Decision {
+export function reconcile(input: { now: Date; servers: ServerState[]; config: FleetConfig; demand?: Demand }): Decision {
   const { now, servers, config } = input;
-  const skip = new Set(config.skipDates);
+  const demand = input.demand ?? staticDemand(config);
   const typeById = new Map(config.types.map((t) => [t.id, t]));
   const classesOf = (typeId: string) => typeById.get(typeId)?.classes ?? 0;
   const ageMinutes = (s: ServerState) => (now.getTime() - s.createdAt.getTime()) / MIN;
 
-  const needCreate = peakClasses(now, new Date(now.getTime() + config.leadMinutes * MIN), config.slots, skip);
-  const needKeep = Math.max(needCreate, peakClasses(now, new Date(now.getTime() + config.keepMinutes * MIN), config.slots, skip));
+  const needCreate = demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN));
+  const needKeep = Math.max(needCreate, demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN)));
 
   const actions: Action[] = [];
   const notes: string[] = [];

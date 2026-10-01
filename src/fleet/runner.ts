@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { Demand } from "./demand.js";
 import type { ComputeProvider } from "./provider.js";
 import { reconcile, type Decision } from "./reconcile.js";
 import type { Action, FleetConfig, ServerState } from "./types.js";
@@ -30,6 +31,8 @@ export async function tick(opts: {
   apply: boolean;
   /** Built fresh for each new server (it carries a one-hour download link). */
   userData: () => Promise<string> | string;
+  /** How many classes to expect (the LMS forecast, or the built-in timetable). Defaults to the built-in one. */
+  demand?: Demand;
   now?: Date;
 }): Promise<TickReport> {
   const now = opts.now ?? new Date();
@@ -37,7 +40,7 @@ export async function tick(opts: {
   const servers: ServerState[] = await Promise.all(
     listed.map(async (s) => ({ ...s, activeJobs: s.status === "running" && s.ip ? await opts.probe(s.ip).catch(() => null) : null })),
   );
-  const decision = reconcile({ now, servers, config: opts.config });
+  const decision = reconcile({ now, servers, config: opts.config, demand: opts.demand });
 
   const executed: Executed[] = [];
   if (opts.apply) {

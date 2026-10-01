@@ -3,6 +3,7 @@
  * The fleet manager's command line.
  *
  *   npm run fleet -- plan [--days 28]        what a month would cost, and the servers' schedule (no network)
+ *   npm run fleet -- forecast [--hours 48]   what the LMS says is coming, and the servers that would follow it
  *   npm run fleet -- status                  the servers that exist right now, and what each is doing
  *   npm run fleet -- tick [--apply]          one pass: what should be created/deleted (dry run unless --apply)
  *   npm run fleet -- create --type ID [--apply]   make one server by hand (for testing)
@@ -17,6 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildUserData } from "./bootstrap.js";
+import { ForecastDemand, fetchForecast, loadDemand, type DemandMode } from "./demand.js";
 import { httpProbe } from "./health.js";
 import { acquireLock } from "./lock.js";
 import { LinodeProvider } from "./linode.js";
@@ -77,6 +79,22 @@ async function makeUserData(): Promise<string> {
 
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
+/** The secret shared with the LMS: the same one the servers use, read from the servers' settings file. */
+function sharedSecret(): string | undefined {
+  if (env.RECORDER_SHARED_SECRET) return env.RECORDER_SHARED_SECRET;
+  const file = resolve(repo, env.FLEET_RECORDER_ENV_FILE ?? "deploy/prod.env");
+  return readEnvFile(file).RECORDER_SHARED_SECRET;
+}
+
+const demandOptions = (config: FleetConfig) => ({
+  config,
+  mode: (env.FLEET_DEMAND_MODE as DemandMode | undefined) ?? "lms",
+  forecastUrl: env.LMS_FORECAST_URL,
+  secret: sharedSecret(),
+});
+
+const schoolTime = (iso: string) => new Date(new Date(iso).getTime() + 3_600_000).toISOString().slice(5, 16).replace("T", " ");
+
 async function main(): Promise<void> {
   const config = loadConfig();
 
@@ -92,6 +110,21 @@ async function main(): Promise<void> {
       const fleet = bestFleet(n, config.types);
       console.log(`  ${n} classes at once -> ${Object.entries(fleet).map(([id, c]) => `${c} x ${config.types.find((t) => t.id === id)?.label}`).join(" + ")}  (${usd(costPerHour(fleet, config.types))}/hour)`);
     }
+    return;
+  }
+
+  if (command === "forecast") {
+    // What the LMS says is coming, and what the fleet would do about it. Read-only.
+    const url = env.LMS_FORECAST_URL;
+    const secret = sharedSecret();
+    if (!url || !secret) throw new Error("set LMS_FORECAST_URL in .env (and a RECORDER_SHARED_SECRET in deploy/prod.env)");
+    const forecast = await fetchForecast({ url, secret, hours: Number(option("hours") ?? 48) });
+    console.log(`LMS timetable: ${forecast.cohorts} cohorts, ${forecast.liveNow} class(es) live now, generated ${forecast.generatedAt}`);
+    if (forecast.buckets.length === 0) console.log("  no classes in this window");
+    for (const b of forecast.buckets) console.log(`  ${schoolTime(b.start)} -> ${schoolTime(b.end).slice(6)}  ${String(b.classes).padStart(2)} classes  -> ${Object.entries(bestFleet(b.classes, config.types)).map(([id, c]) => `${c} x ${config.types.find((t) => t.id === id)?.label}`).join(" + ")}`);
+    const hours = Number(option("hours") ?? 48);
+    const run = simulate({ config, from: new Date(forecast.generatedAt), days: Math.max(1, Math.ceil(hours / 24)), demand: new ForecastDemand(forecast) });
+    console.log(`Servers for this window: about ${usd(run.usd)} (${run.serverHours} server-hours, peak ${run.peakServers} at once, ${run.uncoveredClassMinutes} class-minutes uncovered)`);
     return;
   }
 
@@ -119,8 +152,10 @@ async function main(): Promise<void> {
     const release = acquireLock(join(repo, ".fleet.lock"));
     if (!release) { console.log("Another pass is running (lock held); skipping."); return; }
     try {
-      const report = await tick({ provider: p, probe: httpProbe(), config, apply, userData: makeUserData });
+      const loaded = await loadDemand(demandOptions(config));
+      const report = await tick({ provider: p, probe: httpProbe(), config, apply, userData: makeUserData, demand: loaded.demand });
       console.log(`${report.at.toISOString()}  classes needed within ${config.leadMinutes} min: ${report.decision.need.create}, within ${config.keepMinutes} min: ${report.decision.need.keep}  servers: ${report.servers.length}`);
+      console.log(`  timetable: ${loaded.note}`);
       for (const n of report.decision.notes) console.log(`  note: ${n}`);
       if (report.decision.actions.length === 0) console.log("  nothing to do");
       report.decision.actions.forEach((a, i) => {
