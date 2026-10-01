@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { SIGNATURE_HEADER, TIMESTAMP_HEADER, verify } from "./auth.js";
 import type { Config } from "./config.js";
+import { isSealed, openToken } from "./seal.js";
 import { checkOrigins, jobRequestSchema, publicView } from "./job.js";
 import type { Logger } from "./log.js";
 import { AtCapacityError, type JobManager } from "./manager.js";
@@ -67,8 +68,14 @@ export function createApp(config: Config, manager: JobManager, log: Logger): Ser
           if (!parsed.success) return send(res, 400, { error: "invalid request", issues: parsed.error.issues.map((i) => i.message) });
           const denied = checkOrigins(parsed.data, config);
           if (denied) return send(res, 403, { error: denied });
+          let request = parsed.data;
+          if (isSealed(request.token)) {
+            const opened = openToken(config.RECORDER_SHARED_SECRET, request.jobId, request.token);
+            if (!opened) return send(res, 400, { error: "token could not be opened" });
+            request = { ...request, token: opened };
+          }
           try {
-            const { job, created } = manager.submit(parsed.data);
+            const { job, created } = manager.submit(request);
             return send(res, created ? 202 : 200, { created, job: publicView(job) });
           } catch (error) {
             if (error instanceof AtCapacityError) {
