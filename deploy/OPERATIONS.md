@@ -1,6 +1,6 @@
 # How class recording works, what it costs, and who looks after it
 
-*A plain-English guide for EasyWay. Status: the recorder itself is built and tested; the automatic switch-on/off described in section 3 is a plan, not built yet.*
+*A plain-English guide for EasyWay. Status (1 Oct 2026): the recorder, the tail-loss fix and the automatic server switch-on/off are built and tested on a real Linode account. Nothing is live yet: it still needs the scheduler, the LMS "which server?" link and a pilot (section 9).*
 
 ## 1. The idea in one paragraph
 Today LiveKit records every class and charges about **$1.20 per class-hour**. We built our own recorder: a program that quietly joins each class like an invisible student, films it, and saves the video to Backblaze, exactly where the Watch shelf already looks. LiveKit stays for the live classes themselves. The recorder needs a computer with enough power; we rent that computer **by the hour**, only while classes are on.
@@ -16,7 +16,8 @@ A rented server ("cloud server") is billed per hour it exists. A strong enough s
 
 Your timetable has four slots: Morning 10:00-13:00, Afternoon 13:00-15:00, Evening 17:00-19:00 (Mon-Fri) and Saturday 10:00-14:00. Roughly **200 server-hours a month** if we covered every slot, which is about **$30-75 a month** depending on how much power each class really needs (the load test on a rented server settles that).
 
-## 3. How the automatic switch-on/off would work (the plan)
+## 3. How the automatic switch-on/off works (built; tested on the real account)
+*Proven on 1 Oct 2026: the fleet manager created a small server by itself, it was answering in about 6 minutes, and it deleted it again when no class was due. Cost of that test: about $0.05. Commands: `npm run fleet -- plan | status | tick [--apply] | teardown [--apply] | release`. Everything that spends or deletes money is a **dry run unless `--apply`** is given. A 28-day simulation of the current timetable costs about **$38 per month**, covers every class, and leaves nothing running at night.*
 **Nobody clicks anything.** A small scheduled job inside the LMS (the LMS already runs scheduled jobs) does this:
 
 1. **About 15 minutes before a slot**, it looks at the day's timetable. If classes are planned, it asks the server company (Hetzner) to create a server from a saved copy ("snapshot") that already has the recorder installed. That takes about 1-2 minutes.
@@ -67,6 +68,10 @@ Important: **the safety net is always LiveKit**, so a recording problem should n
 Both are checked before anything goes live: the rented-server test gives the real numbers.
 
 ## 9. What exists today vs what is still to build
-- **Built and tested:** the recorder, its connection to LiveKit and Backblaze, the LMS switch that chooses between our recorder and LiveKit's (off by default), crash handling, a load-test tool, and a server setup kit.
-- **Still to build:** the automatic create/delete of servers (section 3), a small admin panel showing recorder health and estimated cost, and the LMS fix so the later part of a class that was interrupted is never discarded for being short.
-- **Still to test:** on a real server, two classes at once, a 90-minute class, screen sharing, and a side-by-side quality check against today's recordings.
+- **Built and tested:** the recorder, its connection to LiveKit and Backblaze, the LMS switch that chooses between our recorder and LiveKit's (off by default), crash handling, a load-test tool, a server setup kit, **the tail-loss fix** (a crash late in a class no longer loses the end; judged on the whole class), and **the fleet manager** (creates and deletes servers by the timetable, with a hard cap on servers, a 6-hour-style forgotten-server sweep, and a refusal to touch anything not tagged as ours).
+- **Still to build, in this order:**
+  1. **A scheduler** that runs `fleet tick --apply` every 5 minutes somewhere that is always on (a small $5/month server is the simplest; it is the only always-on part).
+  2. **The LMS "which server?" link.** Servers come and go with new addresses, so the LMS needs to find the current ones (plan: the fleet manager publishes a small list in the private bucket; the LMS reads it and picks a server with free space). Also HTTPS between the LMS and the recorder.
+  3. **A small admin panel** showing recorder health and estimated cost.
+- **Still to test:** a larger server (8 cores; only the 2-core size has been created through the fleet manager so far, and the account may have limits), two classes at once through the fleet, a 90-minute class, screen sharing, and a side-by-side quality check against today's recordings.
+- **Before going live:** the pilot on one real class (needs the LMS change merged and deployed; the setting is off by default, so merging changes nothing until it is switched on).
