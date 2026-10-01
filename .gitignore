@@ -13,3 +13,6 @@ deploy/cloud-init.generated.yaml
 deploy/bench/loadpub-linux-amd64
 deploy/.env
 deploy/bench/bench.env
+.fleet.lock
+deploy/prod.env
+fleet.config.json
