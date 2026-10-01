@@ -10,7 +10,7 @@
  *   npm run fleet -- teardown [--apply]      delete EVERY server this fleet made (emergency / end of a test)
  *   npm run fleet -- heartbeat [--log]       when each scheduler last ran, and (with --log) what it did
  *   npm run fleet -- release                 publish the recorder source that new servers build from
- *   npm run fleet -- scheduler [--role standby --region eu-west] [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
+ *   npm run fleet -- scheduler [--role standby --region nl-ams] [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
  *
  * Everything that spends or removes money is a dry run unless `--apply` is given.
  * Settings live in the recorder's .env (LINODE_TOKEN, S3_*), `fleet.config.json` (optional overrides) and
@@ -86,7 +86,7 @@ function provider() {
   const token = env.LINODE_TOKEN;
   if (!token) throw new Error("LINODE_TOKEN is missing from .env");
   const key = env.FLEET_SSH_PUBKEY_FILE && existsSync(env.FLEET_SSH_PUBKEY_FILE) ? readFileSync(env.FLEET_SSH_PUBKEY_FILE, "utf8").trim() : undefined;
-  const fallbackRegions = (env.FLEET_REGION_FALLBACKS ?? "eu-west").split(",").map((r) => r.trim()).filter(Boolean);
+  const fallbackRegions = (env.FLEET_REGION_FALLBACKS ?? "nl-ams").split(",").map((r) => r.trim()).filter(Boolean);
   return new LinodeProvider({ token, region: env.FLEET_REGION ?? "eu-central", fallbackRegions, tag: env.FLEET_TAG ?? "eduprime-recorder", authorizedKeys: key ? [key] : [] });
 }
 
@@ -262,10 +262,10 @@ async function main(): Promise<void> {
   if (command === "scheduler") {
     // The always-on machine that runs `tick --apply` every 5 minutes. Tagged differently so the fleet never touches it.
     const token = env.LINODE_TOKEN!;
-    // --role standby builds the second scheduler, in ANOTHER region (--region, default eu-west), under its own tag.
+    // --role standby builds the second scheduler, in ANOTHER region (--region, default nl-ams), under its own tag.
     const standby = option("role") === "standby";
     const tag = standby ? SCHEDULER_STANDBY_TAG : SCHEDULER_TAG;
-    const sched = new LinodeProvider({ token, region: standby ? option("region") ?? "eu-west" : env.FLEET_REGION ?? "eu-central", tag });
+    const sched = new LinodeProvider({ token, region: standby ? option("region") ?? "nl-ams" : env.FLEET_REGION ?? "eu-central", tag });
     const existing = await sched.list();
     const action = option("do") ?? "create";
     if (action === "status") {
