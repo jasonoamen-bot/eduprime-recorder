@@ -9,6 +9,7 @@
  *   npm run fleet -- create --type ID [--apply]   make one server by hand (for testing)
  *   npm run fleet -- teardown [--apply]      delete EVERY server this fleet made (emergency / end of a test)
  *   npm run fleet -- release                 publish the recorder source that new servers build from
+ *   npm run fleet -- scheduler [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
  *
  * Everything that spends or removes money is a dry run unless `--apply` is given.
  * Settings live in the recorder's .env (LINODE_TOKEN, S3_*), `fleet.config.json` (optional overrides) and
@@ -22,6 +23,7 @@ import { ForecastDemand, fetchForecast, loadDemand, type DemandMode } from "./de
 import { buildDirectory, publishDirectory, type ServerHealth } from "./directory.js";
 import { httpHealth, httpProbe } from "./health.js";
 import { acquireLock } from "./lock.js";
+import { SCHEDULER_TAG, SCHEDULER_TYPE, buildSchedulerUserData } from "./scheduler.js";
 import { LinodeProvider } from "./linode.js";
 import { bestFleet, costPerHour } from "./plan.js";
 import { publishSource, sourceDownloadUrl, type S3Settings } from "./release.js";
@@ -52,7 +54,9 @@ const apply = flag("apply");
 function loadConfig(): FleetConfig {
   const file = join(repo, "fleet.config.json");
   const overrides = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<FleetConfig>) : {};
-  return { ...DEFAULT_CONFIG, ...overrides };
+  const config = { ...DEFAULT_CONFIG, ...overrides };
+  // A pause switch: nothing new is created, but servers still get deleted (so a pause can never leave money running).
+  return env.FLEET_PAUSE_CREATES === "1" ? { ...config, maxCreatesPerTick: 0 } : config;
 }
 
 function s3Settings(): S3Settings {
@@ -181,6 +185,33 @@ async function main(): Promise<void> {
     } finally {
       release();
     }
+    return;
+  }
+
+  if (command === "scheduler") {
+    // The always-on machine that runs `tick --apply` every 5 minutes. Tagged differently so the fleet never touches it.
+    const token = env.LINODE_TOKEN!;
+    const sched = new LinodeProvider({ token, region: env.FLEET_REGION ?? "eu-central", tag: SCHEDULER_TAG });
+    const existing = await sched.list();
+    const action = option("do") ?? "create";
+    if (action === "status") { console.log(existing.length ? existing.map((s) => `${s.label} id=${s.id} ${s.status} ip=${s.ip}`).join("\n") : "No scheduler exists."); return; }
+    if (action === "delete") {
+      for (const s of existing) { if (apply) { await sched.remove(s.id); console.log(`deleted ${s.label}`); } else console.log(`would delete ${s.label} (add --apply)`); }
+      if (existing.length === 0) console.log("No scheduler exists.");
+      return;
+    }
+    if (existing.length > 0) throw new Error(`a scheduler already exists (${existing[0]!.label}); use --do delete first to replace it`);
+    console.log(`The scheduler is a ${SCHEDULER_TYPE} server (about $5/month, always on). It will run \`tick --apply\` every 5 minutes.`);
+    console.log("Once running it WILL create recorder servers by the timetable. Create it only when you are ready for that.");
+    if (!apply) { console.log("(dry run: nothing created. Add --apply.)"); return; }
+    const userData = buildSchedulerUserData({
+      sourceUrl: await sourceDownloadUrl(s3Settings()),
+      dotEnv: readFileSync(join(repo, ".env"), "utf8"),
+      recorderEnv: readFileSync(resolve(repo, env.FLEET_RECORDER_ENV_FILE ?? "deploy/prod.env"), "utf8"),
+      pauseCreates: flag("paused"),
+    });
+    const server = await sched.create({ typeId: SCHEDULER_TYPE, label: `fleet-scheduler-${Date.now().toString(36)}`, userData });
+    console.log(`Created ${server.label} (id ${server.id}). It is ready in about 5 minutes; check with: npm run fleet -- scheduler --do status`);
     return;
   }
 
