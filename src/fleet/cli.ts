@@ -314,7 +314,7 @@ async function main(): Promise<void> {
       return;
     }
     if (existing.length > 0) throw new Error(`a scheduler already exists (${existing[0]!.label}); use --do delete first to replace it`);
-    console.log(`The scheduler is a ${SCHEDULER_TYPE} server (about $5/month, always on). It will run \`tick --apply\` every 5 minutes.`);
+    console.log(`The scheduler is a ${SCHEDULER_TYPE} server (about $5/month, always on). It will run \`tick --apply\` every minute.`);
     console.log("Once running it WILL create recorder servers by the timetable. Create it only when you are ready for that.");
     if (!apply) { console.log("(dry run: nothing created. Add --apply.)"); return; }
     const userData = buildSchedulerUserData({
