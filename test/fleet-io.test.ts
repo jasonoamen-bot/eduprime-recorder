@@ -8,6 +8,7 @@ import { FakeProvider } from "../src/fleet/provider.js";
 import { acquireLock } from "../src/fleet/lock.js";
 import { tick } from "../src/fleet/runner.js";
 import { DEFAULT_CONFIG } from "../src/fleet/slots.js";
+import { LEGACY_CONFIG } from "./legacy-config.js";
 import { httpProbe } from "../src/fleet/health.js";
 
 const TOKEN = "t".repeat(64);
@@ -123,7 +124,7 @@ describe("one pass of the runner", () => {
 
   it("a dry run looks but changes nothing", async () => {
     const provider = new FakeProvider();
-    const report = await tick({ provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: false, userData, now: morning });
+    const report = await tick({ provider, probe: async () => 0, config: LEGACY_CONFIG, apply: false, userData, now: morning });
     expect(report.decision.actions).toHaveLength(1);
     expect(report.executed).toEqual([]);
     expect(provider.created).toHaveLength(0);
@@ -131,7 +132,7 @@ describe("one pass of the runner", () => {
 
   it("with apply it creates what the timetable needs", async () => {
     const provider = new FakeProvider(() => morning);
-    const report = await tick({ provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: true, userData, now: morning });
+    const report = await tick({ provider, probe: async () => 0, config: LEGACY_CONFIG, apply: true, userData, now: morning });
     expect(report.executed).toEqual([expect.objectContaining({ ok: true })]);
     expect(provider.created).toEqual([expect.objectContaining({ typeId: "g6-dedicated-8" })]);
   });
@@ -141,9 +142,9 @@ describe("one pass of the runner", () => {
     const s = await provider.create({ typeId: "g6-dedicated-8", label: "rec-1", userData: "x" });
     provider.servers[0] = { ...s, status: "running", ip: "1.2.3.4" };
     const quiet = new Date("2026-10-05T14:05:00Z"); // no class for an hour+
-    const busy = await tick({ provider, probe: async () => 3, config: DEFAULT_CONFIG, apply: true, userData, now: quiet });
+    const busy = await tick({ provider, probe: async () => 3, config: LEGACY_CONFIG, apply: true, userData, now: quiet });
     expect(busy.decision.actions).toEqual([]);
-    const idle = await tick({ provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: true, userData, now: quiet });
+    const idle = await tick({ provider, probe: async () => 0, config: LEGACY_CONFIG, apply: true, userData, now: quiet });
     expect(idle.executed).toEqual([expect.objectContaining({ ok: true })]);
     expect(provider.removed).toEqual([s.id]);
   });
@@ -154,7 +155,7 @@ describe("one pass of the runner", () => {
     const b = await provider.create({ typeId: "g6-dedicated-4", label: "rec-b", userData: "x" });
     provider.servers = provider.servers.map((s) => ({ ...s, status: "running" as const, ip: "1.1.1.1" }));
     provider.failRemove.add(a.id);
-    const report = await tick({ provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: true, userData, now: new Date("2026-10-05T14:05:00Z") });
+    const report = await tick({ provider, probe: async () => 0, config: LEGACY_CONFIG, apply: true, userData, now: new Date("2026-10-05T14:05:00Z") });
     expect(report.executed.map((e) => e.ok).sort()).toEqual([false, true]);
     expect(provider.removed).toEqual([b.id]);
   });
@@ -163,7 +164,7 @@ describe("one pass of the runner", () => {
     const provider = new FakeProvider(() => new Date("2026-10-05T14:00:00Z"));
     const s = await provider.create({ typeId: "g6-dedicated-8", label: "rec-1", userData: "x" });
     provider.servers[0] = { ...s, status: "running", ip: "1.2.3.4" };
-    const report = await tick({ provider, probe: async () => null, config: DEFAULT_CONFIG, apply: true, userData, now: new Date("2026-10-05T14:05:00Z") });
+    const report = await tick({ provider, probe: async () => null, config: LEGACY_CONFIG, apply: true, userData, now: new Date("2026-10-05T14:05:00Z") });
     expect(provider.removed).toEqual([]); // young and silent: left alone
     expect(report.decision.notes.join(" ")).toMatch(/not answering/);
   });

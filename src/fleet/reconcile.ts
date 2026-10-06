@@ -16,6 +16,8 @@ const MIN = 60_000;
  * create and delete. PURE: no network, no time of its own, so every rule below is tested exactly.
  *
  * RULES, in the order they matter:
+ *  0. Only the office's explicit POWER OFF (`stopAllBefore`) may cut a recording. PAUSE (`drain`) switches off every
+ *     server that is not recording, immediately, but never one that is.
  *  1. NEVER delete a server that is recording (or finishing / uploading), or one we could not ask.
  *  2. Create what the timetable needs `leadMinutes` ahead, so a server is ready before the first tutor joins.
  *  3. Keep an idle server if it is needed again within `keepMinutes` (hourly billing makes delete-then-recreate pointless).
@@ -31,8 +33,11 @@ export function reconcile(input: { now: Date; servers: ServerState[]; config: Fl
   const ageMinutes = (s: ServerState) => (now.getTime() - s.createdAt.getTime()) / MIN;
 
   const withSpare = (peak: number) => (peak > 0 ? peak + Math.max(0, config.spareClasses ?? 0) : 0);
-  const needCreate = withSpare(demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN)));
-  const needKeep = Math.max(needCreate, withSpare(demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN))));
+  // PAUSED (drain): the office wants nothing running. Nothing is needed, so nothing is created and every idle
+  // server below falls out as surplus.
+  const drain = config.drain === true;
+  const needCreate = drain ? 0 : withSpare(demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN)));
+  const needKeep = drain ? 0 : Math.max(needCreate, withSpare(demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN))));
 
   const actions: Action[] = [];
   const notes: string[] = [];
@@ -41,6 +46,22 @@ export function reconcile(input: { now: Date; servers: ServerState[]; config: Fl
     doomed.add(s.id);
     actions.push({ kind: "delete", id: s.id, label: s.label, reason });
   };
+
+  // 0. POWER OFF: the office pressed the big button. Everything created before that moment goes, recording or not.
+  if (config.stopAllBefore) {
+    for (const s of servers) {
+      if (s.createdAt.getTime() <= config.stopAllBefore.getTime()) {
+        remove(s, s.activeJobs ? `powered off by the office (cut ${s.activeJobs} recording${s.activeJobs === 1 ? "" : "s"} in progress)` : "powered off by the office");
+      }
+    }
+  }
+  // PAUSED: a server that is still starting cannot be recording anything, so it goes too. (One that is running but
+  // not answering is left alone, as always: we cannot tell whether it is recording.)
+  if (drain) {
+    for (const s of servers) {
+      if (!doomed.has(s.id) && s.status !== "running") remove(s, "paused: this server is not needed");
+    }
+  }
 
   // 4. The broken and the forgotten (these go even if "needed": a replacement is created below if the timetable wants one).
   for (const s of servers) {
@@ -76,7 +97,7 @@ export function reconcile(input: { now: Date; servers: ServerState[]; config: Fl
       .sort((a, b) => (typeById.get(b.typeId)?.usdPerHour ?? 0) - (typeById.get(a.typeId)?.usdPerHour ?? 0) || a.createdAt.getTime() - b.createdAt.getTime());
     for (const s of idle) {
       if (capacity - classesOf(s.typeId) >= needKeep) {
-        remove(s, needKeep === 0 ? "no classes soon" : `surplus: ${capacity} capacity for ${needKeep} classes`);
+        remove(s, drain ? "paused: idle server switched off" : needKeep === 0 ? "no classes soon" : `surplus: ${capacity} capacity for ${needKeep} classes`);
         capacity -= classesOf(s.typeId);
       }
     }

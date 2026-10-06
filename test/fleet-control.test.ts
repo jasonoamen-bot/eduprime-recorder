@@ -5,6 +5,7 @@ import { ForecastDemand, staticDemand, type Forecast } from "../src/fleet/demand
 import { LinodeProvider } from "../src/fleet/linode.js";
 import { reconcile } from "../src/fleet/reconcile.js";
 import { DEFAULT_CONFIG } from "../src/fleet/slots.js";
+import { LEGACY_CONFIG } from "./legacy-config.js";
 import type { ServerState } from "../src/fleet/types.js";
 
 const at = (iso: string) => new Date(iso);
@@ -41,27 +42,27 @@ describe("what the control file does to the fleet", () => {
   const busy = (): ServerState => ({ ...idle("g6-dedicated-4"), activeJobs: 2 });
 
   it("nothing special: the 10:00 morning slot starts servers", () => {
-    const applied = applyControl(DEFAULT_CONFIG, NO_CONTROL, NOW);
+    const applied = applyControl(LEGACY_CONFIG, NO_CONTROL, NOW);
     const d = reconcile({ now: NOW, servers: [], config: applied.config, demand: applied.adjustDemand(staticDemand(applied.config)) });
     expect(d.actions.some((a) => a.kind === "create")).toBe(true);
   });
 
   it("PAUSED: no server is created, however many classes are due", () => {
-    const applied = applyControl(DEFAULT_CONFIG, file({ paused: true, pauseNote: "billing check" }), NOW);
+    const applied = applyControl(LEGACY_CONFIG, file({ paused: true, pauseNote: "billing check" }), NOW);
     const d = reconcile({ now: NOW, servers: [], config: applied.config, demand: applied.adjustDemand(staticDemand(applied.config)) });
     expect(d.actions.filter((a) => a.kind === "create")).toEqual([]);
     expect(applied.notes[0]).toMatch(/PAUSED by office@school \(billing check\)/);
   });
 
   it("PAUSED never deletes a server that is recording (the safety rule)", () => {
-    const applied = applyControl(DEFAULT_CONFIG, file({ paused: true }), at("2026-10-05T22:00:00Z"));
+    const applied = applyControl(LEGACY_CONFIG, file({ paused: true }), at("2026-10-05T22:00:00Z"));
     const d = reconcile({ now: at("2026-10-05T22:00:00Z"), servers: [busy()], config: applied.config, demand: applied.adjustDemand(staticDemand(applied.config)) });
     expect(d.actions.filter((a) => a.kind === "delete")).toEqual([]);
   });
 
   it("PAUSED still lets an idle server go when nothing is due (a pause can never leave money running)", () => {
     const late = at("2026-10-05T22:00:00Z");
-    const applied = applyControl(DEFAULT_CONFIG, file({ paused: true }), late);
+    const applied = applyControl(LEGACY_CONFIG, file({ paused: true }), late);
     const d = reconcile({ now: late, servers: [idle("g6-dedicated-4")], config: applied.config, demand: applied.adjustDemand(staticDemand(applied.config)) });
     expect(d.actions.filter((a) => a.kind === "delete")).toHaveLength(1);
   });
@@ -69,15 +70,15 @@ describe("what the control file does to the fleet", () => {
   it("BOOST starts a server on a quiet evening, and stops mattering when it expires", () => {
     const quiet = at("2026-10-05T22:00:00Z"); // 23:00 school time, no class
     const control = file({ boost: { classes: 2, until: "2026-10-06T00:00:00.000Z" } });
-    const on = applyControl(DEFAULT_CONFIG, control, quiet);
+    const on = applyControl(LEGACY_CONFIG, control, quiet);
     expect(reconcile({ now: quiet, servers: [], config: on.config, demand: on.adjustDemand(staticDemand(on.config)) }).actions.some((a) => a.kind === "create")).toBe(true);
     const later = at("2026-10-06T00:30:00Z");
-    const off = applyControl(DEFAULT_CONFIG, control, later);
+    const off = applyControl(LEGACY_CONFIG, control, later);
     expect(reconcile({ now: later, servers: [], config: off.config, demand: off.adjustDemand(staticDemand(off.config)) }).actions).toEqual([]);
   });
 
   it("limits from the file override the settings, within bounds", () => {
-    const applied = applyControl(DEFAULT_CONFIG, file({ maxServers: 2, spareClasses: 0 }), NOW);
+    const applied = applyControl(LEGACY_CONFIG, file({ maxServers: 2, spareClasses: 0 }), NOW);
     expect(applied.config.maxServers).toBe(2);
     expect(applied.config.spareClasses).toBe(0);
   });
@@ -195,7 +196,7 @@ describe("the control file written by the LMS", () => {
     const shared = '{"version":1,"updatedAt":"2026-10-05T08:45:00.000Z","updatedBy":"Mary","paused":true,"pauseNote":"checking the bill","skipDates":["2026-12-24","2026-12-25"],"boost":{"classes":2,"until":"2026-10-05T11:45:00.000Z"},"spareClasses":null,"maxServers":4}';
     expect(parseControl(JSON.parse(shared), at("2026-10-05T08:45:00Z"))).toEqual({
       version: 1, updatedAt: "2026-10-05T08:45:00.000Z", updatedBy: "Mary", paused: true, pauseNote: "checking the bill",
-      skipDates: ["2026-12-24", "2026-12-25"], boost: { classes: 2, until: "2026-10-05T11:45:00.000Z" }, spareClasses: null, maxServers: 4,
+      skipDates: ["2026-12-24", "2026-12-25"], boost: { classes: 2, until: "2026-10-05T11:45:00.000Z" }, spareClasses: null, maxServers: 4, stopAllAt: null,
     });
   });
 });

@@ -11,7 +11,7 @@
  *   npm run fleet -- control [--pause "why"|--resume] [--skip DATE|--unskip DATE] [--boost N --hours H|--no-boost]   steer the fleet like the admin page does (no flags: show)
  *   npm run fleet -- heartbeat [--log]       when each scheduler last ran, and (with --log) what it did
  *   npm run fleet -- release                 publish the recorder source that new servers build from
- *   npm run fleet -- scheduler [--role standby --region nl-ams] [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every 5 minutes
+ *   npm run fleet -- scheduler [--role standby --region nl-ams] [--do status|delete] [--apply] [--paused]   the always-on machine that runs `tick` every minute
  *
  * Everything that spends or removes money is a dry run unless `--apply` is given.
  * Settings live in the recorder's .env (LINODE_TOKEN, S3_*), `fleet.config.json` (optional overrides) and
@@ -60,9 +60,10 @@ const apply = flag("apply");
 function loadConfig(): FleetConfig {
   const file = join(repo, "fleet.config.json");
   const overrides = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<FleetConfig>) : {};
-  // One class of headroom by default: a surprise class lands on a free slot instead of waiting for a new server (FLEET_SPARE_CLASSES=0 turns it off).
+  // No spare server by default: a spare is a whole extra server paid for in every class window. An unplanned class is covered by
+  // the office's "start now" boost or the live-now allowance. (FLEET_SPARE_CLASSES=1 brings the headroom back.)
   const spare = Number(env.FLEET_SPARE_CLASSES);
-  const config = { ...DEFAULT_CONFIG, spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : 1, ...overrides };
+  const config = { ...DEFAULT_CONFIG, spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : 0, ...overrides };
   // A pause switch: nothing new is created, but servers still get deleted (so a pause can never leave money running).
   // FLEET_MAX_SERVERS raises/lowers the hard ceiling without a config file (the scheduler server only receives .env).
   const ceiling = Number(env.FLEET_MAX_SERVERS);
@@ -258,7 +259,8 @@ async function main(): Promise<void> {
     const next = { ...current, skipDates: [...current.skipDates], updatedAt: now.toISOString(), updatedBy: "command line" };
     let changed = false;
     if (flag("pause")) { next.paused = true; next.pauseNote = option("pause") && !option("pause")!.startsWith("--") ? option("pause")!.slice(0, 200) : ""; changed = true; }
-    if (flag("resume")) { next.paused = false; next.pauseNote = ""; changed = true; }
+    if (flag("resume")) { next.paused = false; next.pauseNote = ""; next.stopAllAt = null; changed = true; }
+    if (flag("stop-all")) { next.paused = true; next.pauseNote = next.pauseNote || "powered off from the command line"; next.stopAllAt = now.toISOString(); changed = true; }
     if (option("skip")) { if (!/^\d{4}-\d{2}-\d{2}$/.test(option("skip")!)) throw new Error("--skip needs a date like 2026-12-25"); next.skipDates = [...new Set([...next.skipDates, option("skip")!])].sort(); changed = true; }
     if (option("unskip")) { next.skipDates = next.skipDates.filter((d) => d !== option("unskip")); changed = true; }
     if (option("boost")) {
@@ -290,7 +292,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "scheduler") {
-    // The always-on machine that runs `tick --apply` every 5 minutes. Tagged differently so the fleet never touches it.
+    // The always-on machine that runs `tick --apply` every minute. Tagged differently so the fleet never touches it.
     const token = env.LINODE_TOKEN!;
     // --role standby builds the second scheduler, in ANOTHER region (--region, default nl-ams), under its own tag.
     const standby = option("role") === "standby";

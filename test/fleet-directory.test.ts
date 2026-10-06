@@ -5,6 +5,7 @@ import { httpHealth } from "../src/fleet/health.js";
 import { FakeProvider } from "../src/fleet/provider.js";
 import { tick } from "../src/fleet/runner.js";
 import { DEFAULT_CONFIG } from "../src/fleet/slots.js";
+import { LEGACY_CONFIG } from "./legacy-config.js";
 import type { ServerState } from "../src/fleet/types.js";
 
 const NOW = new Date("2026-10-05T14:05:00Z"); // a quiet gap: servers are about to be deleted
@@ -89,7 +90,7 @@ describe("the runner takes servers out of the directory BEFORE deleting them", (
     const original = provider.remove.bind(provider);
     provider.remove = async (id) => { order.push("delete"); return original(id); };
     await tick({
-      provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: true, userData: () => "x", now: NOW,
+      provider, probe: async () => 0, config: LEGACY_CONFIG, apply: true, userData: () => "x", now: NOW,
       beforeApply: async ({ decision }) => { order.push(`hook sees ${decision.actions.filter((a) => a.kind === "delete").length} delete(s)`); },
     });
     expect(order).toEqual(["hook sees 1 delete(s)", "delete"]);
@@ -99,20 +100,20 @@ describe("the runner takes servers out of the directory BEFORE deleting them", (
     const provider = new FakeProvider(() => new Date("2026-10-05T07:00:00Z"));
     const s = await provider.create({ typeId: "g6-dedicated-8", label: "rec-1", userData: "x" });
     provider.servers[0] = { ...s, status: "running", ip: "1.2.3.4" };
-    await tick({ provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: true, userData: () => "x", now: NOW, beforeApply: async () => { throw new Error("bucket down"); } });
+    await tick({ provider, probe: async () => 0, config: LEGACY_CONFIG, apply: true, userData: () => "x", now: NOW, beforeApply: async () => { throw new Error("bucket down"); } });
     expect(provider.removed).toEqual([s.id]);
   });
 
   it("is not called at all in a dry run", async () => {
     let called = false;
-    await tick({ provider: new FakeProvider(), probe: async () => 0, config: DEFAULT_CONFIG, apply: false, userData: () => "x", now: NOW, beforeApply: async () => { called = true; } });
+    await tick({ provider: new FakeProvider(), probe: async () => 0, config: LEGACY_CONFIG, apply: false, userData: () => "x", now: NOW, beforeApply: async () => { called = true; } });
     expect(called).toBe(false);
   });
 
   it("tells userData which size each new server is", async () => {
     const provider = new FakeProvider();
     const sizes: string[] = [];
-    await tick({ provider, probe: async () => 0, config: DEFAULT_CONFIG, apply: true, now: new Date("2026-10-05T08:45:00Z"), userData: ({ typeId }) => { sizes.push(typeId); return "x"; } });
+    await tick({ provider, probe: async () => 0, config: LEGACY_CONFIG, apply: true, now: new Date("2026-10-05T08:45:00Z"), userData: ({ typeId }) => { sizes.push(typeId); return "x"; } });
     expect(sizes).toEqual(["g6-dedicated-8"]);
   });
 });

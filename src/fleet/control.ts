@@ -12,8 +12,11 @@ import type { FleetConfig } from "./types.js";
  * from a phone, with no deploy and no command line.
  *
  * SAFETY RULES (each is tested):
- *  - Nothing here can DELETE a server that is recording. Pausing only stops NEW servers; servers still go when
- *    idle. There is no "stop everything" switch on purpose: killing a server mid-class loses the recording.
+ *  - PAUSE stops new servers AND switches off every server that is not recording, at once (it used to only stop
+ *    new ones, so running servers kept billing and the button looked dead). It never cuts a recording.
+ *  - POWER OFF (`stopAllAt`) is the one deliberate exception: it deletes every server created before that moment,
+ *    recording or not. It only counts for 60 minutes after it was pressed, so a stale value can never delete
+ *    servers started later by an ordinary pass.
  *  - A missing, unreadable or garbled file means "no instructions", never "paused". A broken file cannot switch
  *    the recorder off by accident.
  *  - Every number is bounded, so a typo cannot rent twenty servers.
@@ -24,7 +27,7 @@ export type Control = {
   version: 1;
   updatedAt: string;
   updatedBy: string;
-  /** Create no new servers. Idle ones are still removed. */
+  /** Create no new servers, and switch off every server that is not recording right now. */
   paused: boolean;
   pauseNote: string;
   /** School dates ("2026-12-25") on which the timetable is ignored: no servers are started for them. */
@@ -34,9 +37,14 @@ export type Control = {
   /** Override the spare-capacity and server-count settings. null = leave as configured. */
   spareClasses: number | null;
   maxServers: number | null;
+  /** POWER OFF pressed at this moment (ISO): delete every server created before it, even one that is recording. null = never pressed. */
+  stopAllAt: string | null;
 };
 
-export const NO_CONTROL: Control = { version: 1, updatedAt: "", updatedBy: "", paused: false, pauseNote: "", skipDates: [], boost: null, spareClasses: null, maxServers: null };
+export const NO_CONTROL: Control = { version: 1, updatedAt: "", updatedBy: "", paused: false, pauseNote: "", skipDates: [], boost: null, spareClasses: null, maxServers: null, stopAllAt: null };
+
+/** How long a power-off request stays in force. After this it is history, not an instruction. */
+export const STOP_ALL_WINDOW_MS = 60 * 60_000;
 
 const MAX_BOOST_CLASSES = 12;
 const MAX_BOOST_HOURS = 12;
@@ -81,6 +89,7 @@ export function parseControl(value: unknown, now: Date): Control {
     boost,
     spareClasses: bounded(v.spareClasses, 0, 5),
     maxServers: bounded(v.maxServers, 1, 12),
+    stopAllAt: typeof v.stopAllAt === "string" && Number.isFinite(Date.parse(v.stopAllAt)) ? new Date(Date.parse(v.stopAllAt)).toISOString() : null,
   };
 }
 
@@ -106,8 +115,17 @@ export function applyControl(config: FleetConfig, control: Control, now: Date): 
   const notes: string[] = [];
   let next: FleetConfig = { ...config };
   if (control.paused) {
-    next = { ...next, maxCreatesPerTick: 0 };
-    notes.push(`PAUSED${control.updatedBy ? ` by ${control.updatedBy}` : ""}${control.pauseNote ? ` (${control.pauseNote})` : ""}: no new servers will be started`);
+    // Drain: nothing new, and everything not recording is switched off now.
+    next = { ...next, maxCreatesPerTick: 0, drain: true };
+    notes.push(`PAUSED${control.updatedBy ? ` by ${control.updatedBy}` : ""}${control.pauseNote ? ` (${control.pauseNote})` : ""}: no new servers; idle servers are switched off now; a server recording a class stays until it ends`);
+  }
+  // POWER OFF: only while the request is recent (and not from the future, which would be a clock or a typo problem).
+  if (control.stopAllAt) {
+    const at = Date.parse(control.stopAllAt);
+    if (at <= now.getTime() + 5 * 60_000 && now.getTime() - at <= STOP_ALL_WINDOW_MS) {
+      next = { ...next, stopAllBefore: new Date(Math.min(at, now.getTime())), drain: true, maxCreatesPerTick: 0 };
+      notes.push(`POWER OFF pressed${control.updatedBy ? ` by ${control.updatedBy}` : ""}: every server is being deleted, including any that is recording`);
+    }
   }
   if (control.spareClasses !== null) { next = { ...next, spareClasses: control.spareClasses }; notes.push(`spare capacity set to ${control.spareClasses} class(es)`); }
   if (control.maxServers !== null) { next = { ...next, maxServers: control.maxServers }; notes.push(`server limit set to ${control.maxServers}`); }

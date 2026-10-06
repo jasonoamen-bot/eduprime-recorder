@@ -18,10 +18,11 @@ describe("the scheduler server", () => {
     expect(SCHEDULER_TYPE).toBe("g6-nanode-1");
   });
 
-  it("runs the fleet pass every five minutes and installs what that needs", () => {
+  it("runs the fleet pass every minute and installs what that needs", () => {
     const text = buildSchedulerUserData(ok);
     expect(text.startsWith("#cloud-config\n")).toBe(true);
-    expect(text).toContain("*/5 * * * * root cd /opt/fleet");
+    expect(text).toContain("* * * * * root cd /opt/fleet");
+    expect(text).not.toContain("*/5 * * * *");
     expect(text).toContain("tick --apply");
     for (const piece of ["setup_22.x", "npm ci", "ufw --force enable"]) expect(text).toContain(piece);
   });

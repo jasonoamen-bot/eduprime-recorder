@@ -32,8 +32,11 @@ export const DEFAULT_CONFIG: FleetConfig = {
   types: DEFAULT_TYPES,
   slots: DEFAULT_SLOTS,
   skipDates: [],
-  leadMinutes: 20,
-  keepMinutes: 60,
+  // A server boots in about 6 minutes, so 10 minutes ahead is as late as is safe. (It was 20, and idle for 60 between
+  // classes: both cost money for nothing. A class nobody opens within 15 minutes of its start stops counting anyway:
+  // see CONFIRM_GRACE_MINUTES in the LMS forecast.)
+  leadMinutes: 10,
+  keepMinutes: 10,
   spareClasses: 0,
   maxServers: 4,
   maxCreatesPerTick: 3,

@@ -4,6 +4,7 @@ import { ForecastDemand, fetchForecast, loadDemand, maxDemand, parseForecast, st
 import { reconcile } from "../src/fleet/reconcile.js";
 import { simulate } from "../src/fleet/simulate.js";
 import { DEFAULT_CONFIG } from "../src/fleet/slots.js";
+import { LEGACY_CONFIG } from "./legacy-config.js";
 
 const SECRET = "s".repeat(40);
 const at = (iso: string) => new Date(iso);
@@ -46,7 +47,7 @@ describe("following the LMS forecast", () => {
 });
 
 describe("a timetable change reaches the servers with nobody editing anything", () => {
-  const withNone = (demand = staticDemand(DEFAULT_CONFIG)) => reconcile({ now: NOW, servers: [], config: DEFAULT_CONFIG, demand });
+  const withNone = (demand = staticDemand(LEGACY_CONFIG)) => reconcile({ now: NOW, servers: [], config: LEGACY_CONFIG, demand });
 
   it("sanity: the built-in timetable WOULD start a server for Monday morning", () => {
     expect(withNone().actions).toHaveLength(1);
@@ -59,7 +60,7 @@ describe("a timetable change reaches the servers with nobody editing anything", 
   it("a cohort moved to the afternoon: nothing at 10:00, a server ahead of 14:00 instead", () => {
     const moved = new ForecastDemand(forecast([["2026-10-05T13:00:00Z", "2026-10-05T15:00:00Z", 1]]));
     expect(withNone(moved).actions).toEqual([]); // 08:45: not yet
-    const later = reconcile({ now: at("2026-10-05T12:45:00Z"), servers: [], config: DEFAULT_CONFIG, demand: moved });
+    const later = reconcile({ now: at("2026-10-05T12:45:00Z"), servers: [], config: LEGACY_CONFIG, demand: moved });
     expect(later.actions).toEqual([expect.objectContaining({ kind: "create", typeId: "g6-dedicated-2" })]);
   });
 
@@ -72,7 +73,7 @@ describe("a timetable change reaches the servers with nobody editing anything", 
 
   it("a one-off extra class on a quiet afternoon: a server is started for it", () => {
     const extra = new ForecastDemand(forecast([["2026-10-05T14:30:00Z", "2026-10-05T16:00:00Z", 1]]));
-    const decision = reconcile({ now: at("2026-10-05T14:15:00Z"), servers: [], config: DEFAULT_CONFIG, demand: extra });
+    const decision = reconcile({ now: at("2026-10-05T14:15:00Z"), servers: [], config: LEGACY_CONFIG, demand: extra });
     expect(decision.actions).toEqual([expect.objectContaining({ kind: "create" })]);
   });
 
@@ -83,7 +84,7 @@ describe("a timetable change reaches the servers with nobody editing anything", 
 
   it("once the day's classes are cancelled, an idle server is released", () => {
     const idle = { id: "1", label: "rec-1", typeId: "g6-dedicated-8", status: "running" as const, ip: "1.1.1.1", createdAt: new Date(NOW.getTime() - 3_600_000), activeJobs: 0 };
-    const decision = reconcile({ now: NOW, servers: [idle], config: DEFAULT_CONFIG, demand: new ForecastDemand(forecast([])) });
+    const decision = reconcile({ now: NOW, servers: [idle], config: LEGACY_CONFIG, demand: new ForecastDemand(forecast([])) });
     expect(decision.actions).toEqual([expect.objectContaining({ kind: "delete" })]);
   });
 });
@@ -91,7 +92,7 @@ describe("a timetable change reaches the servers with nobody editing anything", 
 describe("a week followed from the LMS forecast", () => {
   it("a short week with a closed day costs less than a full one, and every class is still covered", () => {
     const mornings = (days: number[]) => forecast(days.map((d) => [`2026-10-${String(d).padStart(2, "0")}T09:00:00Z`, `2026-10-${String(d).padStart(2, "0")}T12:00:00Z`, 5] as [string, string, number]), { to: "2026-10-12T00:00:00Z" });
-    const run = (days: number[]) => simulate({ config: DEFAULT_CONFIG, from: at("2026-10-05T00:00:00Z"), days: 7, demand: new ForecastDemand(mornings(days)) });
+    const run = (days: number[]) => simulate({ config: LEGACY_CONFIG, from: at("2026-10-05T00:00:00Z"), days: 7, demand: new ForecastDemand(mornings(days)) });
     const full = run([5, 6, 7, 8, 9]);
     const short = run([5, 6, 8, 9]); // Wednesday closed
     expect(full.uncoveredClassMinutes).toBe(0);
@@ -153,14 +154,14 @@ describe("choosing the demand for a pass", () => {
   const good = (async () => new Response(JSON.stringify(forecast([]), null, 0))) as unknown as typeof fetch;
 
   it("normally follows the LMS", async () => {
-    const loaded = await loadDemand({ config: DEFAULT_CONFIG, forecastUrl: url, secret: SECRET, now: NOW, fetch: good });
+    const loaded = await loadDemand({ config: LEGACY_CONFIG, forecastUrl: url, secret: SECRET, now: NOW, fetch: good });
     expect(loaded.source).toBe("lms");
     expect(loaded.demand.peak(NOW, new Date(NOW.getTime() + 20 * 60_000))).toBe(0); // the LMS says: no classes
   });
 
   it("falls back to the built-in timetable when the LMS is down, and says so", async () => {
     const down = (async () => { throw new Error("connect ECONNREFUSED"); }) as unknown as typeof fetch;
-    const loaded = await loadDemand({ config: DEFAULT_CONFIG, forecastUrl: url, secret: SECRET, now: NOW, fetch: down });
+    const loaded = await loadDemand({ config: LEGACY_CONFIG, forecastUrl: url, secret: SECRET, now: NOW, fetch: down });
     expect(loaded.source).toBe("static");
     expect(loaded.note).toMatch(/unavailable.*ECONNREFUSED/);
     expect(loaded.demand.peak(NOW, new Date(NOW.getTime() + 20 * 60_000))).toBe(5); // the built-in morning
@@ -168,13 +169,13 @@ describe("choosing the demand for a pass", () => {
 
   it("falls back when the LMS sends rubbish, instead of believing it", async () => {
     const junk = (async () => new Response(JSON.stringify({ hello: "world" }))) as unknown as typeof fetch;
-    expect((await loadDemand({ config: DEFAULT_CONFIG, forecastUrl: url, secret: SECRET, now: NOW, fetch: junk })).source).toBe("static");
+    expect((await loadDemand({ config: LEGACY_CONFIG, forecastUrl: url, secret: SECRET, now: NOW, fetch: junk })).source).toBe("static");
   });
 
   it("with no LMS address configured, uses the built-in timetable without trying the network", async () => {
     let calls = 0;
     const spy = (async () => { calls += 1; return new Response("{}"); }) as unknown as typeof fetch;
-    const loaded = await loadDemand({ config: DEFAULT_CONFIG, now: NOW, fetch: spy });
+    const loaded = await loadDemand({ config: LEGACY_CONFIG, now: NOW, fetch: spy });
     expect(loaded.source).toBe("static");
     expect(calls).toBe(0);
   });
@@ -182,18 +183,18 @@ describe("choosing the demand for a pass", () => {
   it("static mode never asks the LMS", async () => {
     let calls = 0;
     const spy = (async () => { calls += 1; return new Response("{}"); }) as unknown as typeof fetch;
-    await loadDemand({ config: DEFAULT_CONFIG, mode: "static", forecastUrl: url, secret: SECRET, now: NOW, fetch: spy });
+    await loadDemand({ config: LEGACY_CONFIG, mode: "static", forecastUrl: url, secret: SECRET, now: NOW, fetch: spy });
     expect(calls).toBe(0);
   });
 
   it("max mode is never below the built-in timetable (the cautious setting)", async () => {
-    const loaded = await loadDemand({ config: DEFAULT_CONFIG, mode: "max", forecastUrl: url, secret: SECRET, now: NOW, fetch: good });
+    const loaded = await loadDemand({ config: LEGACY_CONFIG, mode: "max", forecastUrl: url, secret: SECRET, now: NOW, fetch: good });
     expect(loaded.source).toBe("max");
     expect(loaded.demand.peak(NOW, new Date(NOW.getTime() + 20 * 60_000))).toBe(5); // LMS says 0, built-in says 5
   });
 
   it("maxDemand takes the larger of two", () => {
     const a = new ForecastDemand(forecast([[...morning, 7]]));
-    expect(maxDemand(a, staticDemand(DEFAULT_CONFIG)).at(at("2026-10-05T10:00:00Z"))).toBe(7);
+    expect(maxDemand(a, staticDemand(LEGACY_CONFIG)).at(at("2026-10-05T10:00:00Z"))).toBe(7);
   });
 });

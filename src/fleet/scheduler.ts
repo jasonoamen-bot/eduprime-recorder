@@ -1,5 +1,5 @@
 /**
- * The scheduler: a tiny always-on server whose only job is to run `fleet tick --apply` every five minutes.
+ * The scheduler: a tiny always-on server whose only job is to run `fleet tick --apply` every minute.
  *
  * Why a separate machine: the fleet manager must keep running when no one's laptop is on, and the Linode token
  * it holds must not live inside the school website (a break-in there would then reach the servers account).
@@ -13,7 +13,7 @@
 export const SCHEDULER_TAG = "eduprime-scheduler";
 /** The second scheduler, in another region: it only acts when the first has gone quiet (see beat.ts). */
 export const SCHEDULER_STANDBY_TAG = "eduprime-scheduler-standby";
-/** Linode's smallest plan (about $5 a month). The job is a few HTTP calls every five minutes. */
+/** Linode's smallest plan (about $5 a month). The job is a few HTTP calls every minute. */
 export const SCHEDULER_TYPE = "g6-nanode-1";
 
 export type SchedulerInput = {
@@ -53,8 +53,8 @@ export function buildSchedulerUserData(input: SchedulerInput): string {
     "  - path: /etc/cron.d/fleet",
     "    permissions: '0644'",
     "    content: |",
-    "      # every 5 minutes: look at the timetable and the servers, create or delete what is needed",
-    "      */5 * * * * root cd /opt/fleet && /usr/bin/npx tsx src/fleet/cli.ts tick --apply >> /var/log/fleet.log 2>&1",
+    "      # every minute: look at the timetable and the servers, create or delete what is needed (a server starts 10 minutes before a class, a no-show is switched off 15 minutes after it starts)",
+    "      * * * * * root cd /opt/fleet && /usr/bin/npx tsx src/fleet/cli.ts tick --apply >> /var/log/fleet.log 2>&1",
     "      # keep the log from growing for ever",
     "      0 4 * * 0 root tail -c 200000 /var/log/fleet.log > /var/log/fleet.log.tmp && mv /var/log/fleet.log.tmp /var/log/fleet.log",
     "runcmd:",

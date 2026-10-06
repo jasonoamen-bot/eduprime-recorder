@@ -64,4 +64,15 @@ export type FleetConfig = {
   stuckMinutes: number;
   /** A running server whose recorder never answers after this long is broken: delete it. */
   unhealthyMinutes: number;
+  /**
+   * DRAIN: the office paused the fleet. Nothing new is started AND every server that is not recording is
+   * switched off now, whatever the timetable says. A server that is recording a class stays until it is idle
+   * (then goes on the next pass), so a pause never cuts a lesson short. Set from the control file.
+   */
+  drain?: boolean;
+  /**
+   * POWER OFF: delete every server created at or before this moment, EVEN IF it is recording. The one deliberate
+   * way to cut a recording, for "stop the money now". Set from the control file only when the request is recent.
+   */
+  stopAllBefore?: Date | null;
 };
