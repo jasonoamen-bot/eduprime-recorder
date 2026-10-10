@@ -211,7 +211,15 @@ describe("reconcile: spare capacity", () => {
   it("costs nothing when no class is expected: no spare server is kept for an empty day", () => {
     expect(reconcile({ now: monday("03:00"), servers: [], config: spare })).toMatchObject({ actions: [], need: { create: 0, keep: 0 } });
   });
-  it("default is no spare, as before", () => {
-    expect(DEFAULT_CONFIG.spareClasses).toBe(0);
+  it("the production defaults keep one class warm even outside timetable windows", () => {
+    const quiet = reconcile({ now: monday("03:00"), servers: [], config: DEFAULT_CONFIG });
+    expect(DEFAULT_CONFIG.warmClasses).toBe(1);
+    expect(quiet.need).toEqual({ create: 1, keep: 1 });
+    expect(quiet.actions).toEqual([expect.objectContaining({ kind: "create" })]);
+  });
+  it("keeps a warm server through an empty timetable window", () => {
+    const quiet = monday("03:00");
+    const idle = server({ now: quiet, typeId: "g6-dedicated-2" });
+    expect(reconcile({ now: quiet, servers: [idle], config: DEFAULT_CONFIG }).actions).toEqual([]);
   });
 });

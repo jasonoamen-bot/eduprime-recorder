@@ -7,4 +7,4 @@ import type { FleetConfig } from "../src/fleet/types.js";
  * explicit config instead of drifting every time the real defaults are tuned. The real defaults have their own tests
  * in fleet-strict.test.ts.
  */
-export const LEGACY_CONFIG: FleetConfig = { ...DEFAULT_CONFIG, leadMinutes: 20, keepMinutes: 60, spareClasses: 0 };
+export const LEGACY_CONFIG: FleetConfig = { ...DEFAULT_CONFIG, leadMinutes: 20, keepMinutes: 60, spareClasses: 0, warmClasses: 0 };

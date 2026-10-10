@@ -1,6 +1,6 @@
 # How class recording works, what it costs, and who looks after it
 
-*A plain-English guide for EasyWay. Status (1 Oct 2026): the recorder, the tail-loss fix and the automatic server switch-on/off are built and tested on a real Linode account. Nothing is live yet: it still needs the scheduler, the LMS "which server?" link and a pilot (section 9).*
+*A plain-English guide for EasyWay. Status (10 Oct 2026): the recorder fleet, LMS forecast/directory integration, and primary plus standby schedulers are running in production.*
 
 ## 1. The idea in one paragraph
 Today LiveKit records every class and charges about **$1.20 per class-hour**. We built our own recorder: a program that quietly joins each class like an invisible student, films it, and saves the video to Backblaze, exactly where the Watch shelf already looks. LiveKit stays for the live classes themselves. The recorder needs a computer with enough power; we rent that computer **by the hour**, only while classes are on.
@@ -10,21 +10,21 @@ A rented server ("cloud server") is billed per hour it exists. A strong enough s
 
 | When | What happens | Cost |
 |---|---|---|
-| Night and weekends with no class | No server exists | **$0** |
-| Shortly before a class slot | A server is created automatically | about $0.14 per hour |
+| Between class slots | One class of recorder capacity stays warm | about **$0.054 per hour** |
+| Before a class slot | The fleet scales to the forecast plus one spare class | depends on the number and size of servers |
 | After the slot ends and recordings are saved | The server is deleted automatically | stops |
 
 Your timetable has four slots: Morning 10:00-13:00, Afternoon 13:00-15:00, Evening 17:00-19:00 (Mon-Fri) and Saturday 10:00-14:00. Roughly **200 server-hours a month** if we covered every slot, which is about **$30-75 a month** depending on how much power each class really needs (the load test on a rented server settles that).
 
 ## 3. How the automatic switch-on/off works (built; tested on the real account)
-*Proven on 1 Oct 2026: the fleet manager created a small server by itself, it was answering in about 6 minutes, and it deleted it again when no class was due. Cost of that test: about $0.05. Commands: `npm run fleet -- plan | status | tick [--apply] | teardown [--apply] | release`. Everything that spends or deletes money is a **dry run unless `--apply`** is given. A 28-day simulation of the current timetable costs about **$38 per month**, covers every class, and leaves nothing running at night.*
-**Nobody clicks anything.** A small scheduled job inside the LMS (the LMS already runs scheduled jobs) does this:
+*The fleet scheduler runs every minute, with a second scheduler in standby. It keeps at least one class of recorder capacity warm, and plans one additional class of spare capacity on top of forecast demand. The warm one-class server costs about **$39 per 30-day month** at current rates, before scheduled scaling. Commands: `npm run fleet -- plan | status | tick [--apply] | teardown [--apply] | release`. Spending or deleting is a **dry run unless `--apply`** is given.*
+**The fleet operates automatically.** Its scheduler does this:
 
-1. **About 15 minutes before a slot**, it looks at the day's timetable. If classes are planned, it asks the server company (Hetzner) to create a server from a saved copy ("snapshot") that already has the recorder installed. That takes about 1-2 minutes.
-2. It waits until the new server says "I'm ready", and adds it to the LMS's list of recorders.
+1. Every minute it reads the LMS timetable and checks recorder health and spare capacity.
+2. It creates enough Linode servers ahead of scheduled classes and publishes ready servers to the LMS's private fleet directory.
 3. **When a tutor starts a class**, the LMS asks a recorder with free space to record it. If none is free, or none is up, the LMS uses **LiveKit's recording for that class** (the safety net that exists today).
-4. **After the slot ends, and once every recording is saved**, plus a 20-minute buffer, the job deletes the server.
-5. **A safety sweep** runs every few hours: any server older than 6 hours is deleted, so a forgotten server can never run for days.
+4. **After the slot ends and recordings finish uploading**, surplus servers are deleted. At least one class of capacity remains warm.
+5. Broken and forgotten servers are replaced or swept automatically; a server that is recording is not deleted.
 
 Bigger mornings (several levels at once) need more than one server; the job creates as many as the timetable needs.
 
@@ -45,7 +45,7 @@ Bigger mornings (several levels at once) need more than one server; the job crea
 | A server is forgotten | The 6-hour safety sweep deletes it | at most about $0.85 (6 hours) |
 | The recorder cannot save to Backblaze | Admins get the existing "A class recording failed" alert; the file is kept on the server and retried | none |
 
-Important: **the safety net is always LiveKit**, so a recording problem should never mean a class goes unrecorded.
+Important: **LiveKit is the emergency safety net** if the self-hosted fleet cannot accept a recording. LiveKit Egress is paid, and a cloud/provider outage can still prevent both systems from recording.
 
 ## 6. Who looks after what
 | Who | Job | How often |
@@ -69,10 +69,10 @@ Both are checked before anything goes live: the rented-server test gives the rea
 
 ## 9. What exists today vs what is still to build
 - **Built and tested:** the recorder, its connection to LiveKit and Backblaze, the LMS switch that chooses between our recorder and LiveKit's (off by default), crash handling, a load-test tool, a server setup kit, **the tail-loss fix** (a crash late in a class no longer loses the end; judged on the whole class), and **the fleet manager** (creates and deletes servers by the timetable, with a hard cap on servers, a 6-hour-style forgotten-server sweep, and a refusal to touch anything not tagged as ours).
-- **Also built (2 Oct 2026), all tested but not switched on:**
+- **Also built and running in production:**
   - **It follows the real timetable.** The LMS has a read-only endpoint, `/api/recorder/forecast`, that says how many classes will be live over the next 48 hours, built from the same schedule the admin calendar shows: cohort rotations, tutor-moved times, cancellations, postponements, closed days, one-off classes, private lessons, and any class live right now (even an unscheduled one). The fleet manager asks it every pass, so a timetable change reaches the servers by itself; nobody edits anything on the server side. If the LMS can't be reached it falls back to the built-in timetable and says so. A school holiday means no servers; a class moved to the afternoon moves the servers with it.
   - **The LMS finds servers that come and go.** The fleet manager keeps a small list of running servers in the private bucket; the LMS (when `RECORDER_FLEET=1`) picks one with free room, tries up to 3, and falls back to LiveKit recording if none is open. Each server accepts only as many classes as its size can take.
-  - **A scheduler server** (about $5/month, always on) that runs the fleet pass every 5 minutes, created with `npm run fleet -- scheduler --apply`. Not created yet on purpose.
+  - **Primary and standby scheduler servers** (about $5/month each) that run the fleet pass every minute.
 - **Still to build, in this order:**
   1. **HTTPS between the LMS and the recorder servers** (today the job request travels over plain HTTP; it carries a listen-only, one-room pass, but encrypting it is the right thing before real use).
   2. **A small admin panel** showing recorder health and estimated cost, and an alert if the scheduler stops.

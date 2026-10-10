@@ -60,10 +60,16 @@ const apply = flag("apply");
 function loadConfig(): FleetConfig {
   const file = join(repo, "fleet.config.json");
   const overrides = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Partial<FleetConfig>) : {};
-  // No spare server by default: a spare is a whole extra server paid for in every class window. An unplanned class is covered by
-  // the office's "start now" boost or the live-now allowance. (FLEET_SPARE_CLASSES=1 brings the headroom back.)
+  // Keep one class of headroom during timetable windows, and one class of recorder capacity warm at all times.
+  // FLEET_SPARE_CLASSES and FLEET_WARM_CLASSES can tune these floors.
   const spare = Number(env.FLEET_SPARE_CLASSES);
-  const config = { ...DEFAULT_CONFIG, spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : 0, ...overrides };
+  const warm = Number(env.FLEET_WARM_CLASSES);
+  const config = {
+    ...DEFAULT_CONFIG,
+    spareClasses: Number.isFinite(spare) && env.FLEET_SPARE_CLASSES !== undefined && env.FLEET_SPARE_CLASSES !== "" ? Math.max(0, Math.floor(spare)) : DEFAULT_CONFIG.spareClasses,
+    warmClasses: Number.isFinite(warm) && env.FLEET_WARM_CLASSES !== undefined && env.FLEET_WARM_CLASSES !== "" ? Math.max(0, Math.floor(warm)) : DEFAULT_CONFIG.warmClasses,
+    ...overrides,
+  };
   // A pause switch: nothing new is created, but servers still get deleted (so a pause can never leave money running).
   // FLEET_MAX_SERVERS raises/lowers the hard ceiling without a config file (the scheduler server only receives .env).
   const ceiling = Number(env.FLEET_MAX_SERVERS);

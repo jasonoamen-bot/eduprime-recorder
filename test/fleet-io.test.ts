@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -10,6 +11,7 @@ import { tick } from "../src/fleet/runner.js";
 import { DEFAULT_CONFIG } from "../src/fleet/slots.js";
 import { LEGACY_CONFIG } from "./legacy-config.js";
 import { httpProbe } from "../src/fleet/health.js";
+import { packSource } from "../src/fleet/release.js";
 
 const TOKEN = "t".repeat(64);
 
@@ -115,6 +117,26 @@ describe("first-boot text", () => {
   it("adds a debugging key only when given", () => {
     expect(buildUserData(ok)).not.toContain("ssh_authorized_keys");
     expect(buildUserData({ ...ok, sshPublicKey: "ssh-ed25519 AAAA test" })).toContain("ssh-ed25519 AAAA test");
+  });
+});
+
+describe("published recorder source", () => {
+  it("archives tracked changes but never uploads unrelated untracked local files", () => {
+    const repo = mkdtempSync(join(tmpdir(), "recorder-release-"));
+    try {
+      execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
+      mkdirSync(join(repo, "src"));
+      writeFileSync(join(repo, "src", "tracked.ts"), "export const ready = true;\n");
+      writeFileSync(join(repo, "livekit-new.txt"), "untracked local data\n");
+      execFileSync("git", ["add", "src/tracked.ts"], { cwd: repo, stdio: "ignore" });
+
+      const archive = packSource(repo);
+      const files = execFileSync("tar", ["-tzf", "-"], { input: archive }).toString("utf8");
+      expect(files).toContain("src/tracked.ts");
+      expect(files).not.toContain("livekit-new.txt");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
 

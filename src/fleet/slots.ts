@@ -37,7 +37,8 @@ export const DEFAULT_CONFIG: FleetConfig = {
   // see CONFIRM_GRACE_MINUTES in the LMS forecast.)
   leadMinutes: 10,
   keepMinutes: 10,
-  spareClasses: 0,
+  spareClasses: 1,
+  warmClasses: 1,
   maxServers: 4,
   maxCreatesPerTick: 3,
   maxAgeHours: 8,

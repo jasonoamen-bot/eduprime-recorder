@@ -36,8 +36,8 @@ export function reconcile(input: { now: Date; servers: ServerState[]; config: Fl
   // PAUSED (drain): the office wants nothing running. Nothing is needed, so nothing is created and every idle
   // server below falls out as surplus.
   const drain = config.drain === true;
-  const needCreate = drain ? 0 : withSpare(demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN)));
-  const needKeep = drain ? 0 : Math.max(needCreate, withSpare(demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN))));
+  const needCreate = drain ? 0 : Math.max(config.warmClasses, withSpare(demand.peak(now, new Date(now.getTime() + config.leadMinutes * MIN))));
+  const needKeep = drain ? 0 : Math.max(config.warmClasses, needCreate, withSpare(demand.peak(now, new Date(now.getTime() + config.keepMinutes * MIN))));
 
   const actions: Action[] = [];
   const notes: string[] = [];

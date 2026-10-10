@@ -54,6 +54,8 @@ export type FleetConfig = {
   keepMinutes: number;
   /** Extra classes of room to keep whenever any class is expected: a surprise class (an extra session, a tutor going live early) lands on a free slot instead of waiting for a new server. */
   spareClasses: number;
+  /** Minimum recorder capacity to keep running even when the timetable is empty. */
+  warmClasses: number;
   /** Hard ceiling on servers at any moment: the only thing standing between a bug and a large bill. */
   maxServers: number;
   /** Most creations in a single pass. */

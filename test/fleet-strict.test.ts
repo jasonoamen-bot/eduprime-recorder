@@ -28,26 +28,30 @@ function forecastWith(generatedAt: Date, classes: number, liveNow = 0): Forecast
   };
 }
 
-describe("the defaults are strict", () => {
-  it("a server starts 10 minutes ahead, not 20; an idle one is not kept for an hour; no spare server", () => {
+describe("the defaults keep a warm safety margin", () => {
+  it("a server starts 10 minutes ahead and keeps one class warm, with one more class of scheduled headroom", () => {
     expect(DEFAULT_CONFIG.leadMinutes).toBe(10);
     expect(DEFAULT_CONFIG.keepMinutes).toBe(10);
-    expect(DEFAULT_CONFIG.spareClasses).toBe(0);
+    expect(DEFAULT_CONFIG.spareClasses).toBe(1);
+    expect(DEFAULT_CONFIG.warmClasses).toBe(1);
   });
 
-  it("nothing is started 15 minutes before a class any more, but is 10 minutes before", () => {
+  it("keeps warm capacity before a class and scales to the scheduled load at lead time", () => {
     const demand = new ForecastDemand(forecastWith(at("2026-10-06T08:40:00Z"), 2));
-    // 08:45Z: the class at 09:00Z is 15 min away -> not yet.
-    expect(reconcile({ now: at("2026-10-06T08:45:00Z"), servers: [], config: DEFAULT_CONFIG, demand }).actions).toEqual([]);
-    // 08:50Z: 10 min away -> start.
-    expect(reconcile({ now: at("2026-10-06T08:50:00Z"), servers: [], config: DEFAULT_CONFIG, demand }).actions.some((a) => a.kind === "create")).toBe(true);
+    // 08:45Z: the class at 09:00Z is 15 min away, but the warm reserve starts now.
+    const warm = reconcile({ now: at("2026-10-06T08:45:00Z"), servers: [], config: DEFAULT_CONFIG, demand });
+    expect(warm.need.create).toBe(1);
+    expect(warm.actions).toEqual([expect.objectContaining({ kind: "create", typeId: "g6-dedicated-2" })]);
+    // 08:50Z: 10 minutes before class, scale to two scheduled classes plus one spare.
+    expect(reconcile({ now: at("2026-10-06T08:50:00Z"), servers: [], config: DEFAULT_CONFIG, demand }).need.create).toBe(3);
   });
 
-  it("an idle server goes as soon as no class is due within the lead time (it used to wait up to an hour)", () => {
+  it("keeps the warm reserve between classes", () => {
     const now = at("2026-10-06T14:00:00Z"); // between slots
     const demand = new ForecastDemand(forecastWith(at("2026-10-06T13:55:00Z"), 0));
     const decision = reconcile({ now, servers: [server(now)], config: DEFAULT_CONFIG, demand });
-    expect(decision.actions).toEqual([expect.objectContaining({ kind: "delete" })]);
+    expect(decision.actions).toEqual([]);
+    expect(decision.need).toEqual({ create: 1, keep: 1 });
   });
 });
 
@@ -63,12 +67,12 @@ describe("PAUSE switches servers off; it does not just stop new ones", () => {
     expect(applied.notes.join(" ")).toMatch(/idle servers are switched off now/);
   });
 
-  it("an IDLE server is deleted straight away even though classes are scheduled (this was the bug)", () => {
+  it("scheduled headroom is created; PAUSE then drains every idle server", () => {
     const idle = server(now);
-    // Two classes scheduled, one server that covers them. Before: it was "needed" and stayed billing.
+    // Two scheduled classes plus one spare require another server.
     const small = new ForecastDemand(forecastWith(at("2026-10-06T09:28:00Z"), 2, 1));
-    expect(reconcile({ now, servers: [idle], config: DEFAULT_CONFIG, demand: small }).actions).toEqual([]);
-    // Now: the pause switches it off.
+    expect(reconcile({ now, servers: [idle], config: DEFAULT_CONFIG, demand: small }).actions).toEqual([expect.objectContaining({ kind: "create" })]);
+    // Pause suppresses creation and switches the idle server off.
     const decision = reconcile({ now, servers: [idle], config: paused().config, demand: small });
     expect(decision.actions).toEqual([expect.objectContaining({ kind: "delete", id: idle.id, reason: expect.stringMatching(/paused/) })]);
   });
@@ -141,6 +145,7 @@ describe("a class nobody opens costs 15 minutes, not an hour (5 to detect + 10 g
       buckets: [{ start: "2026-10-06T09:00:00.000Z", end: "2026-10-06T09:15:00.000Z", classes: 2 }],
     });
     const idle = server(now, { ageMin: 26 });
-    expect(reconcile({ now, servers: [idle], config: DEFAULT_CONFIG, demand }).actions).toEqual([expect.objectContaining({ kind: "delete", id: idle.id })]);
+    const noWarmReserve = { ...DEFAULT_CONFIG, warmClasses: 0, spareClasses: 0 };
+    expect(reconcile({ now, servers: [idle], config: noWarmReserve, demand }).actions).toEqual([expect.objectContaining({ kind: "delete", id: idle.id })]);
   });
 });
